@@ -1,0 +1,30 @@
+contract: public.pipeline_run
+version: 1
+description: 幂等管线运行记录表（P7）
+primary_key: [run_id]
+columns:
+  - {name: run_id,       type: TEXT,        nullable: false, semantic: 运行唯一标识（UUID）}
+  - {name: started_at,   type: TIMESTAMPTZ, nullable: false, semantic: 运行开始时间}
+  - {name: completed_at, type: TIMESTAMPTZ, nullable: true,  semantic: 运行完成时间}
+  - {name: code_commit,  type: TEXT,        nullable: true,  semantic: 代码版本（git commit hash）}
+  - {name: input_hash,   type: TEXT,        nullable: true,  semantic: 输入快照哈希（源表行数 + max_date）}
+  - {name: output_hash,  type: TEXT,        nullable: true,  semantic: 输出快照哈希（当前未使用）}
+  - {name: status,       type: TEXT,        nullable: true,  semantic: "running / ok / failed"}
+  - {name: products,     type: JSONB,       nullable: true,  semantic: "产出摘要：{canonical_symbol: N, corporate_action_event: N, ...}"}
+constraints:
+  - "PRIMARY KEY (run_id)"
+indexes:
+  - "idx_pipeline_run_started ON (started_at DESC)"
+products_schema: |
+  {
+    "canonical_symbol": int,           # P1 产出行数
+    "corporate_action_event": int,     # P2 产出行数
+    "materialized_views_refreshed": int, # P3 刷新视图数
+    "reconcile_checks": int,           # P4 检查项数
+    "freshness_tables": int            # P5 监控表数
+  }
+idempotency_rule: |
+  相同 (input_hash, code_commit) 的运行应产出相同 products。
+  若不一致，说明管线非幂等，需排查。
+source_tables: [ju.stocks, ju.st_period, ju.valuation, tong.symbol_meta, tong.gbbq]
+consumers: [pipeline runner, validate/suite.py V11]

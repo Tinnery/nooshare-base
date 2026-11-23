@@ -1,0 +1,21 @@
+contract: public.valuation_pit
+version: 1
+description: 估值数据物化 PIT 视图（P3）
+type: materialized_view
+columns:
+  - {name: canonical_id,      type: TEXT,        nullable: false, semantic: 关联 canonical_symbol.canonical_id}
+  - {name: symbol,            type: TEXT,        nullable: false, semantic: 带交易所前缀（如 sz000001）}
+  - {name: effective_from,    type: DATE,        nullable: false, semantic: 估值区间开始日期}
+  - {name: effective_to,      type: DATE,        nullable: false, semantic: 估值区间结束日期}
+  - {name: capitalization,    type: NUMERIC,     nullable: true,  semantic: 总市值（万元）}
+  - {name: circulating_cap,   type: NUMERIC,     nullable: true,  semantic: 流通市值（万元）}
+  - {name: observed_at,       type: TIMESTAMPTZ, nullable: false, semantic: 观测时间（ju.valuation.refreshed_at）}
+indexes:
+  - "idx_valuation_pit_canonical ON (canonical_id, effective_from)"
+  - "idx_valuation_pit_symbol ON (symbol, effective_from)"
+pit_semantics: |
+  物化视图暴露全部历史区间，下游需自行做 as-of 过滤：
+  WHERE effective_from <= :as_of AND effective_to >= :as_of
+source_tables: [ju.valuation]
+refresh_strategy: 每次 pipeline build 后 REFRESH MATERIALIZED VIEW
+consumers: [downstream indicators module]

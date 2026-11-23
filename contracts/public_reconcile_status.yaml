@@ -1,0 +1,21 @@
+contract: public.reconcile_status
+version: 1
+description: 跨源对账状态表（P4）
+primary_key: [namespace, table_name, check_type, check_date]
+columns:
+  - {name: namespace,   type: TEXT,        nullable: false, semantic: 命名空间（如 ju / tong / finance）}
+  - {name: table_name,  type: TEXT,        nullable: false, semantic: 表名}
+  - {name: check_type,  type: TEXT,        nullable: false, semantic: "检查类型：stocks_vs_symbol_meta / calendar_completeness / event_anomalies / symbol_coverage"}
+  - {name: check_date,  type: DATE,        nullable: false, semantic: 检查日期}
+  - {name: status,      type: TEXT,        nullable: false, semantic: "pass / warn / fail"}
+  - {name: details,     type: JSONB,       nullable: true,  semantic: 检查详情（JSON）}
+  - {name: checked_at,  type: TIMESTAMPTZ, nullable: false, semantic: 检查时间（DEFAULT now()）}
+constraints:
+  - "PRIMARY KEY (namespace, table_name, check_type, check_date)"
+check_types:
+  stocks_vs_symbol_meta: "ju.stocks 与 tong.symbol_meta 覆盖范围对比"
+  calendar_completeness: "交易日历完整性检查（V3）"
+  event_anomalies: "公司行为事件异常检测"
+  symbol_coverage: "符号覆盖率检查（V4）"
+source_tables: [ju.stocks, tong.symbol_meta, public.corporate_action_event]
+consumers: [pipeline runner, data quality monitoring]

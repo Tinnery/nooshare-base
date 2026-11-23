@@ -1,0 +1,309 @@
+"""Database connection and operations. 沿用 indicators 模式。"""
+import logging
+from contextlib import contextmanager
+from io import StringIO
+from typing import Optional
+
+import pandas as pd
+import psycopg2
+
+from . import config
+
+log = logging.getLogger(__name__)
+
+
+@contextmanager
+def get_connection():
+    """Get database connection context manager."""
+    conn = psycopg2.connect(config.get_pg_dsn())
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def execute_sql(sql: str, params: Optional[tuple] = None, fetch: bool = False):
+    """Execute SQL statement."""
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            if fetch:
+                return cur.fetchall()
+            conn.commit()
+
+
+def read_sql(query: str, params: Optional[tuple] = None) -> pd.DataFrame:
+    """Read SQL query into DataFrame."""
+    with get_connection() as conn:
+        return pd.read_sql(query, conn, params=params)
+
+
+def init_schema():
+    """Initialize public schema and tables."""
+    execute_sql("CREATE SCHEMA IF NOT EXISTS public;")
+
+    tables_sql = """
+    -- P1: 规范符号主数据
+    CREATE TABLE IF NOT EXISTS public.canonical_symbol (
+        canonical_id TEXT PRIMARY KEY,
+        exchange TEXT NOT NULL,
+        code TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        asset_class TEXT,
+        list_date DATE,
+        delist_date DATE,
+        created_at TIMESTAMPTZ DEFAULT now(),
+        updated_at TIMESTAMPTZ DEFAULT now()
+    );
+
+    -- P2: 公司行为事件溯源
+    CREATE TABLE IF NOT EXISTS public.corporate_action_event (
+        event_id TEXT PRIMARY KEY,
+        canonical_id TEXT NOT NULL REFERENCES public.canonical_symbol(canonical_id),
+        event_type TEXT NOT NULL,
+        effective_date DATE NOT NULL,
+        pub_date DATE,
+        observed_at TIMESTAMPTZ DEFAULT now(),
+        payload JSONB,
+        source_id TEXT,
+        created_at TIMESTAMPTZ DEFAULT now(),
+        UNIQUE (canonical_id, event_type, effective_date, source_id)
+    );
+
+    -- P4: 跨源对账状态
+    CREATE TABLE IF NOT EXISTS public.reconcile_status (
+        namespace TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        check_type TEXT NOT NULL,
+        check_date DATE NOT NULL,
+        status TEXT NOT NULL,
+        details JSONB,
+        checked_at TIMESTAMPTZ DEFAULT now(),
+        PRIMARY KEY (namespace, table_name, check_type, check_date)
+    );
+
+    -- P5: 数据新鲜度
+    CREATE TABLE IF NOT EXISTS public.data_freshness (
+        namespace TEXT NOT NULL,
+        table_name TEXT NOT NULL,
+        max_date DATE,
+        row_count BIGINT,
+        refreshed_at TIMESTAMPTZ DEFAULT now(),
+        status TEXT,
+        PRIMARY KEY (namespace, table_name)
+    );
+
+    -- P7: 幂等管线运行记录
+    CREATE TABLE IF NOT EXISTS public.pipeline_run (
+        run_id TEXT PRIMARY KEY,
+        started_at TIMESTAMPTZ NOT NULL,
+        completed_at TIMESTAMPTZ,
+        code_commit TEXT,
+        input_hash TEXT,
+        output_hash TEXT,
+        status TEXT,
+        products JSONB
+    );
+
+    -- P3 扩展: 后复权价格序列（base hfq 命令计算写入，源 tong.gbbq category=1）
+    CREATE TABLE IF NOT EXISTS public.hfq_daily (
+        symbol TEXT NOT NULL,
+        date INTEGER NOT NULL,
+        open DOUBLE PRECISION,
+        high DOUBLE PRECISION,
+        low DOUBLE PRECISION,
+        close DOUBLE PRECISION,
+        open_hfq DOUBLE PRECISION,
+        high_hfq DOUBLE PRECISION,
+        low_hfq DOUBLE PRECISION,
+        close_hfq DOUBLE PRECISION,
+        factor_cum DOUBLE PRECISION NOT NULL,
+        hfq_return DOUBLE PRECISION,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (symbol, date)
+    );
+
+    -- 索引
+    CREATE INDEX IF NOT EXISTS idx_canonical_symbol_symbol ON public.canonical_symbol(symbol);
+    CREATE INDEX IF NOT EXISTS idx_corporate_action_event_canonical ON public.corporate_action_event(canonical_id, effective_date);
+    CREATE INDEX IF NOT EXISTS idx_pipeline_run_started ON public.pipeline_run(started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_hfq_daily_date ON public.hfq_daily(date);
+    """
+    execute_sql(tables_sql)
+
+    # P3: 物化 PIT 视图
+    # 先删除旧视图（如果存在）
+    execute_sql("DROP VIEW IF EXISTS public.canonical_symbol_pit CASCADE;")
+    execute_sql("DROP MATERIALIZED VIEW IF EXISTS public.st_status_pit CASCADE;")
+    execute_sql("DROP MATERIALIZED VIEW IF EXISTS public.financial_data_pit CASCADE;")
+    
+    # 创建物化视图
+    mv_sql = """
+    -- ST 状态物化视图：从 st_mark/st_remove 事件构建区间
+    CREATE MATERIALIZED VIEW IF NOT EXISTS public.st_status_pit AS
+    SELECT
+        e.canonical_id,
+        c.symbol,
+        e.effective_date AS effective_from,
+        LEAD(e.effective_date - INTERVAL '1 day') OVER (
+            PARTITION BY e.canonical_id ORDER BY e.effective_date
+        ) AS effective_to,
+        e.pub_date,
+        e.payload->>'st_type' AS st_type,
+        e.observed_at
+    FROM public.corporate_action_event e
+    JOIN public.canonical_symbol c ON c.canonical_id = e.canonical_id
+    WHERE e.event_type IN ('st_mark', 'st_remove')
+    ORDER BY e.canonical_id, e.effective_date;
+
+    -- 估值数据物化视图：从 ju.valuation 投影，关联 canonical_id
+    CREATE MATERIALIZED VIEW IF NOT EXISTS public.valuation_pit AS
+    SELECT
+        c.canonical_id,
+        c.symbol,
+        v.start_date AS effective_from,
+        v.end_date AS effective_to,
+        v.capitalization,
+        v.circulating_cap,
+        v.refreshed_at AS observed_at
+    FROM ju.valuation v
+    JOIN public.canonical_symbol c ON c.code = v.stock_code
+    ORDER BY c.canonical_id, v.start_date;
+
+    -- 复权因子物化视图：从 dividend/split 事件构建
+    CREATE MATERIALIZED VIEW IF NOT EXISTS public.adjustment_factor_pit AS
+    SELECT
+        e.canonical_id,
+        c.symbol,
+        e.effective_date,
+        e.event_type,
+        e.payload,
+        e.observed_at
+    FROM public.corporate_action_event e
+    JOIN public.canonical_symbol c ON c.canonical_id = e.canonical_id
+    WHERE e.event_type IN ('dividend', 'split')
+    ORDER BY e.canonical_id, e.effective_date;
+
+    -- 财务报表 PIT 视图：利润表
+    CREATE MATERIALIZED VIEW IF NOT EXISTS public.income_statement_pit AS
+    SELECT
+        c.canonical_id,
+        c.symbol,
+        i.report_date,
+        i.pub_date,
+        i.revenue,
+        i.operating_revenue,
+        i.net_profit,
+        i.net_profit_parent,
+        i.eps,
+        i.created_at AS observed_at
+    FROM finance.income_statement i
+    JOIN public.canonical_symbol c ON c.code = i.code
+    ORDER BY c.canonical_id, i.report_date;
+
+    -- 财务报表 PIT 视图：资产负债表
+    CREATE MATERIALIZED VIEW IF NOT EXISTS public.balance_sheet_pit AS
+    SELECT
+        c.canonical_id,
+        c.symbol,
+        b.report_date,
+        b.pub_date,
+        b.total_assets,
+        b.current_assets,
+        b.total_liabilities,
+        b.shareholders_equity,
+        b.created_at AS observed_at
+    FROM finance.balance_sheet b
+    JOIN public.canonical_symbol c ON c.code = b.code
+    ORDER BY c.canonical_id, b.report_date;
+
+    -- 财务报表 PIT 视图：现金流量表
+    CREATE MATERIALIZED VIEW IF NOT EXISTS public.cash_flow_pit AS
+    SELECT
+        c.canonical_id,
+        c.symbol,
+        cf.report_date,
+        cf.pub_date,
+        cf.operating_cash_flow,
+        cf.investing_cash_flow,
+        cf.financing_cash_flow,
+        cf.net_cash_flow,
+        cf.created_at AS observed_at
+    FROM finance.cash_flow cf
+    JOIN public.canonical_symbol c ON c.code = cf.code
+    ORDER BY c.canonical_id, cf.report_date;
+
+    -- 物化视图索引
+    CREATE INDEX IF NOT EXISTS idx_st_status_pit_canonical ON public.st_status_pit(canonical_id, effective_from);
+    CREATE INDEX IF NOT EXISTS idx_st_status_pit_symbol ON public.st_status_pit(symbol, effective_from);
+    CREATE INDEX IF NOT EXISTS idx_valuation_pit_canonical ON public.valuation_pit(canonical_id, effective_from);
+    CREATE INDEX IF NOT EXISTS idx_valuation_pit_symbol ON public.valuation_pit(symbol, effective_from);
+    CREATE INDEX IF NOT EXISTS idx_adjustment_factor_pit_canonical ON public.adjustment_factor_pit(canonical_id, effective_date);
+    CREATE INDEX IF NOT EXISTS idx_adjustment_factor_pit_symbol ON public.adjustment_factor_pit(symbol, effective_date);
+    CREATE INDEX IF NOT EXISTS idx_income_statement_pit_canonical ON public.income_statement_pit(canonical_id, report_date);
+    CREATE INDEX IF NOT EXISTS idx_income_statement_pit_symbol ON public.income_statement_pit(symbol, report_date);
+    CREATE INDEX IF NOT EXISTS idx_balance_sheet_pit_canonical ON public.balance_sheet_pit(canonical_id, report_date);
+    CREATE INDEX IF NOT EXISTS idx_balance_sheet_pit_symbol ON public.balance_sheet_pit(symbol, report_date);
+    CREATE INDEX IF NOT EXISTS idx_cash_flow_pit_canonical ON public.cash_flow_pit(canonical_id, report_date);
+    CREATE INDEX IF NOT EXISTS idx_cash_flow_pit_symbol ON public.cash_flow_pit(symbol, report_date);
+    """
+    execute_sql(mv_sql)
+
+
+def refresh_materialized_views():
+    """刷新所有物化 PIT 视图。在 pipeline 构建完成后调用。"""
+    views = [
+        "public.st_status_pit",
+        "public.valuation_pit", 
+        "public.adjustment_factor_pit",
+        "public.income_statement_pit",
+        "public.balance_sheet_pit",
+        "public.cash_flow_pit",
+    ]
+    for view in views:
+        log.info(f"刷新物化视图: {view}")
+        execute_sql(f"REFRESH MATERIALIZED VIEW {view}")
+    log.info(f"已刷新 {len(views)} 个物化视图")
+
+
+def copy_upsert(df: pd.DataFrame, schema: str, table: str):
+    """COPY + temp table upsert pattern. 沿用 indicators 模式。
+
+    只 COPY DataFrame 中有的列；DEFAULT 列（如 created_at）由数据库自动填充。
+    """
+    if df.empty:
+        return
+    temp_table = f"_temp_{table}"
+    columns = list(df.columns)
+    col_str = ", ".join(columns)
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS {temp_table}")
+            # 临时表只包含 DataFrame 有的列，不带 DEFAULT
+            cur.execute(f"""
+                CREATE TEMP TABLE {temp_table} AS
+                SELECT {col_str} FROM {schema}.{table} WHERE FALSE
+            """)
+            buf = StringIO()
+            df.to_csv(buf, sep="\t", header=False, index=False, na_rep="\\N")
+            buf.seek(0)
+            cur.copy_from(buf, temp_table, null="\\N")
+
+            # 查询目标表的主键列
+            cur.execute(
+                "SELECT a.attname FROM pg_index i "
+                "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
+                "WHERE i.indrelid = '%s.%s'::regclass AND i.indisprimary" % (schema, table)
+            )
+            pk_cols = [row[0] for row in cur.fetchall()]
+            pk_str = ", ".join(pk_cols)
+            update_str = ", ".join(
+                f"{c} = EXCLUDED.{c}" for c in columns if c not in pk_cols
+            )
+            cur.execute(
+                f"INSERT INTO {schema}.{table} ({col_str}) "
+                f"SELECT {col_str} FROM {temp_table} "
+                f"ON CONFLICT ({pk_str}) DO UPDATE SET {update_str}"
+            )
+            cur.execute(f"DROP TABLE IF EXISTS {temp_table}")
+        conn.commit()

@@ -1,0 +1,21 @@
+contract: public.st_status_pit
+version: 1
+description: ST 状态物化 PIT 视图（P3）
+type: materialized_view
+columns:
+  - {name: canonical_id,   type: TEXT, nullable: false, semantic: 关联 canonical_symbol.canonical_id}
+  - {name: symbol,         type: TEXT, nullable: false, semantic: 带交易所前缀（如 sz000001）}
+  - {name: effective_from, type: DATE, nullable: false, semantic: ST 状态开始日期}
+  - {name: effective_to,   type: DATE, nullable: true,  semantic: ST 状态结束日期（NULL 表示当前仍为 ST）}
+  - {name: pub_date,       type: DATE, nullable: true,  semantic: 公告日期（当前为 NULL）}
+  - {name: st_type,        type: TEXT, nullable: true,  semantic: "ST 类型：ST / *ST / S*ST"}
+  - {name: observed_at,    type: TIMESTAMPTZ, nullable: false, semantic: 观测时间}
+indexes:
+  - "idx_st_status_pit_canonical ON (canonical_id, effective_from)"
+  - "idx_st_status_pit_symbol ON (symbol, effective_from)"
+pit_semantics: |
+  物化视图暴露全部历史区间，下游需自行做 as-of 过滤：
+  WHERE effective_from <= :as_of AND (effective_to IS NULL OR effective_to > :as_of)
+source_tables: [public.corporate_action_event]
+refresh_strategy: 每次 pipeline build 后 REFRESH MATERIALIZED VIEW
+consumers: [downstream indicators module, pit/views.py query_st_status()]

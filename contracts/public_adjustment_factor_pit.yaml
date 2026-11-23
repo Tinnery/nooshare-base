@@ -1,0 +1,21 @@
+contract: public.adjustment_factor_pit
+version: 1
+description: 复权因子物化 PIT 视图（P3）
+type: materialized_view
+columns:
+  - {name: canonical_id,   type: TEXT,        nullable: false, semantic: 关联 canonical_symbol.canonical_id}
+  - {name: symbol,         type: TEXT,        nullable: false, semantic: 带交易所前缀（如 sz000001）}
+  - {name: effective_date, type: DATE,        nullable: false, semantic: 除权除息日}
+  - {name: event_type,     type: TEXT,        nullable: false, semantic: "dividend（分红）/ split（拆股）"}
+  - {name: payload,        type: JSONB,       nullable: true,  semantic: "复权详情：{per_10shares, bonus_ratio} 或 {ratio}"}
+  - {name: observed_at,    type: TIMESTAMPTZ, nullable: false, semantic: 观测时间}
+indexes:
+  - "idx_adjustment_factor_pit_canonical ON (canonical_id, effective_date)"
+  - "idx_adjustment_factor_pit_symbol ON (symbol, effective_date)"
+pit_semantics: |
+  物化视图暴露全部历史事件，下游需自行做 as-of 过滤：
+  WHERE effective_date <= :as_of
+  累计复权因子需由下游按时间顺序累乘计算。
+source_tables: [public.corporate_action_event]
+refresh_strategy: 每次 pipeline build 后 REFRESH MATERIALIZED VIEW
+consumers: [downstream indicators module, pit/views.py query_adjustment_factors()]

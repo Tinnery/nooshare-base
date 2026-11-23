@@ -1,0 +1,90 @@
+schema_version: 2
+
+# nooshare-base 的知识索引（repo 级）。
+#
+# 原则：
+#   1. 权威只持一份 —— 系统职责与跨仓边界以 nooshare-design 为 normative 权威，本 repo 只引用，不复制。
+#   2. 本 repo 的 normative 权威是 contracts/（数据产品契约）、AGENTS.md（铁律）与 README 的分层铁律。
+#   3. 与上游的结构继承关系、已知坑清单见 docs/UPSTREAM_LINKAGE.md。
+
+project:
+  name: nooshare-base
+  description: nooshare 矩阵的基础数据产品层 —— 将 namespace 原始数据加工为 point-in-time 正确的 public.* 数据产品。
+  scope: 只读源 namespaces（ju/tong/finance/capital），只写 public.*；不采集、不算指标、不做分析。
+  position: nooshare-design/architecture/matrix.md 定义的「标准化数据基础」实现仓库。
+
+resources:
+  # ── 治理层 ──
+  - path: AGENTS.md
+    kind: agent-rules
+    status: current
+    authority: normative
+    read_when: Agent 会话进入本 repo 时首先装载；权威路由与五条铁律。
+  - path: README.md
+    kind: repo-governance
+    status: current
+    authority: normative
+    read_when: 首次接触本 repo；需要分层铁律、职责边界与知识导航时。
+
+  # ── 方向 / 需求层 ──
+  - path: deliverables/01-需求说明书-nooshare-base.md
+    kind: requirements
+    status: delivered
+    authority: normative
+    read_when: 理解 P1-P7 目标、"Deeper not bigger"原则或 Out of Scope 边界时。P1-P7 已实现交付。
+
+  # ── 控制层（契约冻结）──
+  - path: contracts/
+    kind: schema-contracts
+    status: current
+    authority: normative
+    read_when: 修改任何表结构前；下游编写查询前；上游疑似变更后。public_* 为本 repo 产出契约，ju/tong/finance 为上游消费契约。
+  - path: docs/UPSTREAM_LINKAGE.md
+    kind: upstream-linkage
+    status: current
+    authority: normative
+    read_when: 新会话首次进入本 repo；调试列名/类型错误；评估上游结构变更影响时。
+  - path: docs/OVERVIEW.md
+    kind: repo-overview
+    status: current
+    authority: normative
+    read_when: 需要目录职责、输入输出契约、SLO 与发布变更原则全貌时（README 精简后承接其细节）。
+
+  # ── 工程事实层 ──
+  - path: docs/DATA_DICTIONARY.md
+    kind: data-dictionary
+    status: current
+    authority: factual-reference
+    read_when: 首次接触 public.* 各表的列定义、约束、索引与 PIT 语义时。由 scripts/generate_docs.py 从契约自动生成，勿手改。
+  - path: docs/API_REFERENCE.md
+    kind: cli-reference
+    status: current
+    authority: factual-reference
+    read_when: 使用 13 个 CLI 命令（init-db/build/reconcile/freshness/hfq/validate/monitor/backtest/contract-test/benchmark/lineage/sla/dashboard）时。
+  - path: docs/USAGE_EXAMPLES.md
+    kind: usage-examples
+    status: current
+    authority: factual-reference
+    read_when: 编写典型查询（ST 历史/估值 PIT/复权/财报 as-of）时。
+  - path: docs/README.md
+    kind: docs-index
+    status: current
+    authority: factual-reference
+    read_when: 需要文档导航时。
+
+  # ── 关键代码入口（DDL 与管线的事实来源）──
+  - path: base/db.py
+    kind: ddl-entry
+    status: current
+    authority: factual-reference
+    read_when: 修改 public.* 表结构或物化视图定义时。注意：DDL inline 于 init_schema()，本 repo 无 migrations/ 目录。
+  - path: base/pipeline/runner.py
+    kind: pipeline-entry
+    status: current
+    authority: factual-reference
+    read_when: 理解 P1-P7 执行顺序、幂等记录（pipeline_run）时。
+  - path: scripts/generate_docs.py
+    kind: docs-generator
+    status: current
+    authority: factual-reference
+    read_when: 契约变更后需要重新生成 docs/ 三件套时。

@@ -1,0 +1,125 @@
+name: Data Pipeline CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:  # 手动触发
+
+jobs:
+  unit-tests:
+    name: Unit tests (no database)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync
+
+      # 不设置任何 PG_* 环境变量：conftest 会跳过集成测试，
+      # 只执行纯函数单元测试（tests/test_unit.py）。
+      - name: Run unit tests
+        run: uv run pytest -v
+
+  integration-pipeline:
+    name: Integration pipeline (synthetic data)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: nooshare
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    # 与 base/config.py 对齐：应用读取 PG_HOST/PG_PORT/... 各分量，
+    # 不读取 PG_DSN。数据库名与 service 的 POSTGRES_DB 一致。
+    env:
+      PG_HOST: localhost
+      PG_PORT: 5432
+      PG_USER: postgres
+      PG_PASSWORD: postgres
+      PG_DATABASE: nooshare
+      PG_SSLMODE: prefer
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run tests (unit; integration marked tests when present)
+        run: uv run pytest -v
+
+      - name: Load synthetic CI fixture (ju/tong/finance, no real data)
+        run: uv run python scripts/ci_fixture.py
+
+      - name: Initialize database schema
+        run: uv run base init-db
+
+      # 跑两次 build：相同 (输入快照, 代码 commit) 产生幂等对，
+      # 使 V11 幂等门禁有可比对的 pipeline_run 记录。
+      - name: Run data pipeline (build #1)
+        run: uv run base build
+
+      - name: Run data pipeline (build #2, idempotency pair for V11)
+        run: uv run base build
+
+      - name: Run validation suite (V9-V12)
+        run: uv run base validate
+
+      - name: Data freshness report (non-blocking)
+        run: |
+          uv run python -c "
+          from base.db import read_sql
+          freshness = read_sql('SELECT * FROM public.data_freshness ORDER BY status DESC, namespace')
+          print(freshness.to_string())
+          # 合成数据日期较早，stale/missing 属预期，不作为失败条件
+          missing = freshness[freshness['status'] == 'missing']
+          if not missing.empty:
+              print(f'\\n⚠️  {len(missing)} 张表状态为 missing（源数据可能未导入）')
+          "
+
+      - name: Upload pipeline run report
+        if: always()
+        run: |
+          uv run python -c "
+          from base.db import read_sql
+          runs = read_sql('''
+              SELECT run_id, status, started_at, completed_at,
+                     products->>'canonical_symbol' as canonical_symbol_count,
+                     products->>'corporate_action_event' as event_count
+              FROM public.pipeline_run
+              ORDER BY started_at DESC
+              LIMIT 5
+          ''')
+          print('\\n=== 最近 5 次管线运行 ===')
+          print(runs.to_string())
+          "

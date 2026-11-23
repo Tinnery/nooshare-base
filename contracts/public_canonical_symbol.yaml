@@ -1,0 +1,25 @@
+contract: public.canonical_symbol
+version: 2
+description: 全矩阵唯一证券标识 hub（P1）
+primary_key: [canonical_id]
+columns:
+  - {name: canonical_id, type: TEXT,        nullable: false, semantic: 全矩阵唯一标识（纯代码，如 000001）}
+  - {name: exchange,     type: TEXT,        nullable: false, semantic: "交易所：sh / sz / bj（ju.stocks.exchange 小写值）"}
+  - {name: code,         type: TEXT,        nullable: false, semantic: 纯数字代码（ju 风格）}
+  - {name: symbol,       type: TEXT,        nullable: false, semantic: 带交易所前缀（tong 风格，如 sz000001）}
+  - {name: asset_class,  type: TEXT,        nullable: true,  semantic: 证券分类（tong.symbol_meta.class）}
+  - {name: list_date,    type: DATE,        nullable: true,  semantic: 上市日}
+  - {name: delist_date,  type: DATE,        nullable: true,  semantic: 退市日（在市为 NULL）}
+  - {name: created_at,   type: TIMESTAMPTZ, nullable: false, semantic: 创建时间（DEFAULT now()）}
+  - {name: updated_at,   type: TIMESTAMPTZ, nullable: false, semantic: 更新时间（DEFAULT now()）}
+constraints:
+  - "PRIMARY KEY (canonical_id)"
+  - "UNIQUE (exchange, code) — 通过 canonical_id = code 保证"
+  - "canonical_id ↔ (tong.symbol_meta, ju.stocks) 映射无歧义（V12）"
+indexes:
+  - "idx_canonical_symbol_symbol ON (symbol)"
+slo:
+  completeness: 覆盖 tong.symbol_meta 与 ju.stocks 全部证券，对交易所官方列表计数差异 = 0（V4）
+  consistency: tong.symbol ↔ ju.stock_code 映射差异全部进 reconcile 台账（V12）
+source_tables: [ju.stocks, tong.symbol_meta]
+consumers: [downstream indicators module, all public.* views]

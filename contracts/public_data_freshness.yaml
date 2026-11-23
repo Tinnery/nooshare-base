@@ -1,0 +1,22 @@
+contract: public.data_freshness
+version: 1
+description: 数据新鲜度监控表（P5）
+primary_key: [namespace, table_name]
+columns:
+  - {name: namespace,    type: TEXT,        nullable: false, semantic: 命名空间（如 ju / tong / finance / public）}
+  - {name: table_name,   type: TEXT,        nullable: false, semantic: 表名}
+  - {name: max_date,     type: DATE,        nullable: true,  semantic: 表中最大日期（无日期列为 NULL）}
+  - {name: row_count,    type: BIGINT,      nullable: true,  semantic: 行数}
+  - {name: refreshed_at, type: TIMESTAMPTZ, nullable: false, semantic: 刷新时间（DEFAULT now()）}
+  - {name: status,       type: TEXT,        nullable: true,  semantic: "fresh / stale / missing（按表配置阈值判断）"}
+constraints:
+  - "PRIMARY KEY (namespace, table_name)"
+stale_thresholds:
+  ju.trading_day:   7 days
+  ju.st_period:     30 days
+  ju.valuation:     30 days
+  tong.stock_daily: 7 days
+  tong.gbbq:        30 days
+  finance.*:        90 days
+source_tables: [ju.*, tong.*, finance.*, public.*]
+consumers: [pipeline runner, data quality monitoring, alerting]
