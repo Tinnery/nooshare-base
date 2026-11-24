@@ -90,7 +90,7 @@ def validate_log_return_additivity(sample_size: int = 100) -> Dict[str, Any]:
 
                 if error > 1e-10:
                     errors.append({
-                        "code": code,
+                        "symbol": symbol,
                         "date": group.iloc[i]["date"],
                         "window": window,
                         "direct": direct,
