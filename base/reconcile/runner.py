@@ -55,7 +55,7 @@ def reconcile_stocks_vs_symbol_meta(run_date: Optional[str] = None) -> Dict[str,
     tong_meta["code"] = tong_meta["symbol"].str[2:]
     tong_codes = set(tong_meta["code"].unique())
 
-    # 比对
+    # 集合比较（精确核对证券标识，不以数量相同代替集合一致）
     only_in_ju = ju_codes - tong_codes
     only_in_tong = tong_codes - ju_codes
     common = ju_codes & tong_codes
@@ -68,8 +68,10 @@ def reconcile_stocks_vs_symbol_meta(run_date: Optional[str] = None) -> Dict[str,
     status = "pass" if mismatch_count == 0 else "warn" if mismatch_count < 10 else "fail"
 
     detail = {
-        "only_in_ju_sample": list(only_in_ju)[:10],
-        "only_in_tong_sample": list(only_in_tong)[:10],
+        "only_in_ju_count": len(only_in_ju),
+        "only_in_ju_sample": sorted(list(only_in_ju))[:10],
+        "only_in_tong_count": len(only_in_tong),
+        "only_in_tong_sample": sorted(list(only_in_tong))[:10],
     }
 
     result = {
@@ -272,6 +274,51 @@ def reconcile_symbol_coverage(run_date: Optional[str] = None) -> Dict[str, Any]:
     return result
 
 
+def reconcile_symbol_identity_mismatch(run_date: Optional[str] = None) -> Dict[str, Any]:
+    """对账：证券身份映射冲突检测。
+
+    调用 symbol.master.detect_symbol_mismatches() 检测 exchange 映射冲突。
+
+    Returns:
+        对账结果
+    """
+    log.info("对账: 证券身份映射冲突检测")
+
+    if run_date is None:
+        run_date = date.today().isoformat()
+
+    from base.symbol.master import detect_symbol_mismatches
+
+    mismatches = detect_symbol_mismatches()
+
+    # 统计总数
+    total_result = read_sql("SELECT COUNT(*) as cnt FROM public.canonical_symbol")
+    total_count = total_result.iloc[0]["cnt"] if not total_result.empty else 0
+
+    mismatch_count = len(mismatches)
+    status = "pass" if mismatch_count == 0 else "warn" if mismatch_count < 10 else "fail"
+
+    detail = {
+        "mismatches_sample": mismatches[:10],
+    }
+
+    result = {
+        "check_name": "symbol_identity_mismatch",
+        "run_date": run_date,
+        "left_count": total_count,
+        "right_count": None,
+        "match_count": total_count - mismatch_count,
+        "mismatch_count": mismatch_count,
+        "status": status,
+        "detail": detail,
+    }
+
+    _write_reconcile_result(result)
+
+    log.info(f"对账完成: total={total_count}, mismatches={mismatch_count}, status={status}")
+    return result
+
+
 def _write_reconcile_result(result: Dict[str, Any]) -> None:
     """写入对账结果到 public.reconcile_status。"""
     import json
@@ -320,6 +367,7 @@ def run_reconciliation(run_date: Optional[str] = None) -> List[Dict[str, Any]]:
       - calendar_completeness: ju.trading_day 完整性检查（V3 基础检查）
       - event_anomalies: corporate_action_event 异常检测
       - symbol_coverage: canonical_symbol 覆盖率检查（V4）
+      - symbol_identity_mismatch: 证券身份映射冲突检测
 
     差异只记录不修正。
 
@@ -338,6 +386,7 @@ def run_reconciliation(run_date: Optional[str] = None) -> List[Dict[str, Any]]:
     results.append(reconcile_calendar_completeness(run_date))
     results.append(reconcile_event_anomalies(run_date))
     results.append(reconcile_symbol_coverage(run_date))
+    results.append(reconcile_symbol_identity_mismatch(run_date))
 
     # 汇总
     pass_count = sum(1 for r in results if r["status"] == "pass")

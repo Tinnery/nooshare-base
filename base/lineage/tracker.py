@@ -399,20 +399,23 @@ def build_valuation_lineage():
     # 对每行 PIT 数据，找到对应的 ju.valuation 源行
     for _, row in pit_df.iterrows():
         canonical_id = row["canonical_id"]
+        symbol = row["symbol"]
         effective_from = row["effective_from"]
         observed_at = row["observed_at"]
 
         # 查找对应的 ju.valuation 行
         # 注意：ju.valuation 没有主键，用 (stock_code, start_date) 作为标识
+        # 修复 P1.3: 必须按证券代码约束，避免匹配到错误证券的数据
         source_df = read_sql("""
             SELECT stock_code, start_date
             FROM ju.valuation
-            WHERE start_date = %s
+            WHERE stock_code = %s AND start_date = %s
             LIMIT 1
-        """, params=(effective_from,))
+        """, params=(symbol, effective_from))
 
         if not source_df.empty:
-            source_row_id = f"{source_df.iloc[0]['stock_code']}|{effective_from}"
+            # 修复 P1.3: source_row_id 使用更精确的唯一标识
+            source_row_id = f"ju.valuation:{symbol}|{effective_from}"
 
             lineage_records.append({
                 "target_table": "public.valuation_pit",
@@ -422,7 +425,7 @@ def build_valuation_lineage():
                 "source_observed_at": observed_at,
                 "transform_type": "direct_join",
                 "transform_rule": {
-                    "join_condition": "canonical_symbol.code = ju.valuation.stock_code",
+                    "join_condition": "canonical_symbol.symbol = ju.valuation.stock_code",
                     "projection": ["capitalization", "circulating_cap"],
                 },
             })
@@ -482,7 +485,7 @@ def build_st_status_lineage():
                 "transform_type": "event_sourcing",
                 "transform_rule": {
                     "event_types": ["st_mark", "st_remove"],
-                    "interval_construction": "LEAD(effective_date) OVER (PARTITION BY canonical_id)",
+                    "interval_construction": "LATERAL JOIN to find next st_remove event",
                 },
             })
 

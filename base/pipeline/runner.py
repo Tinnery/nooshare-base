@@ -50,12 +50,24 @@ def compute_input_hash() -> str:
     import hashlib
 
     # 采集关键源表的元信息 (namespace, table, date_col or None, pk_cols)
+    # 覆盖所有影响 public.* 产物的源表
     tables_to_hash = [
+        # P1: 证券身份
         ("ju", "stocks", None, ["stock_code"]),
-        ("ju", "st_period", "start_date", ["stock_code", "start_date"]),
-        ("ju", "valuation", "start_date", ["stock_code", "start_date"]),
         ("tong", "symbol_meta", None, ["symbol"]),
+        # P2: 公司行为事件
+        ("ju", "st_period", "start_date", ["stock_code", "start_date"]),
         ("tong", "gbbq", "date", ["symbol", "date"]),
+        # P3: 估值/复权/行情
+        ("ju", "valuation", "start_date", ["stock_code", "start_date"]),
+        ("tong", "stock_daily", "date", ["symbol", "date"]),
+        # P3: 财务报表（PIT 视图依赖）
+        ("finance", "income_statement", "report_date", ["code", "report_date"]),
+        ("finance", "balance_sheet", "report_date", ["code", "report_date"]),
+        ("finance", "cash_flow", "report_date", ["code", "report_date"]),
+        # P3: 交易日历/涨跌停规则
+        ("ju", "trading_day", "trade_date", ["trade_date"]),
+        ("ju", "limit_ratio", "start_date", ["stock_code", "start_date"]),
     ]
 
     snapshot_parts = []
@@ -105,6 +117,72 @@ def compute_input_hash() -> str:
     return hashlib.md5(snapshot_str.encode()).hexdigest()
 
 
+def compute_output_hash(products: Dict[str, int]) -> str:
+    """计算产物内容哈希。
+    
+    对关键 public.* 表的内容做哈希，用于验证幂等性。
+    采用采样策略：对大表取前 1000 行，小表全量哈希。
+    
+    Args:
+        products: 产物行数统计（用于判断表大小）
+    
+    Returns:
+        产物内容哈希字符串
+    """
+    import hashlib
+    
+    # 关键产物表 (table, pk_cols, sample_threshold)
+    # sample_threshold: 行数超过此值则采样，否则全量
+    output_tables = [
+        ("public.canonical_symbol", ["canonical_id"], 10000),
+        ("public.corporate_action_event", ["event_id"], 50000),
+        ("public.hfq_daily", ["symbol", "date"], 1000000),
+    ]
+    
+    snapshot_parts = []
+    
+    for table, pk_cols, threshold in output_tables:
+        try:
+            row_count = products.get(table.split(".")[-1], 0)
+            
+            # 根据表大小决定采样策略
+            if row_count > threshold:
+                # 大表：采样前 1000 行
+                pk_order = ", ".join(pk_cols)
+                checksum_result = read_sql(f"""
+                    SELECT md5(string_agg(row_data, '')) as content_checksum
+                    FROM (
+                        SELECT t::text as row_data
+                        FROM {table} t
+                        ORDER BY {pk_order}
+                        LIMIT 1000
+                    ) h
+                """)
+            else:
+                # 小表：全量哈希
+                pk_order = ", ".join(pk_cols)
+                checksum_result = read_sql(f"""
+                    SELECT md5(string_agg(row_data, '')) as content_checksum
+                    FROM (
+                        SELECT t::text as row_data
+                        FROM {table} t
+                        ORDER BY {pk_order}
+                    ) h
+                """)
+            
+            content_checksum = "null"
+            if not checksum_result.empty and checksum_result.iloc[0]["content_checksum"]:
+                content_checksum = checksum_result.iloc[0]["content_checksum"]
+            
+            snapshot_parts.append(f"{table}:{row_count}:{content_checksum}")
+        except Exception as e:
+            log.warning(f"计算产物哈希失败: {table}: {e}")
+            snapshot_parts.append(f"{table}:error")
+    
+    snapshot_str = "|".join(snapshot_parts)
+    return hashlib.md5(snapshot_str.encode()).hexdigest()
+
+
 def start_pipeline_run(code_commit: str, input_hash: str) -> str:
     """记录 pipeline_run 开始，返回 run_id。"""
     import uuid
@@ -118,19 +196,27 @@ def start_pipeline_run(code_commit: str, input_hash: str) -> str:
     return run_id
 
 
-def finish_pipeline_run(run_id: str, status: str, products: Dict[str, int]) -> None:
-    """记录 pipeline_run 完成。"""
+def finish_pipeline_run(run_id: str, status: str, products: Dict[str, int], output_hash: str = None) -> None:
+    """记录 pipeline_run 完成。
+    
+    Args:
+        run_id: 运行 ID
+        status: 状态 (ok/failed)
+        products: 产物行数统计
+        output_hash: 产物内容哈希（可选，用于幂等性验证）
+    """
     import json
 
     execute_sql("""
         UPDATE public.pipeline_run
         SET completed_at = NOW(),
             status = %s,
-            products = %s::jsonb
+            products = %s::jsonb,
+            output_hash = %s
         WHERE run_id = %s
-    """, params=(status, json.dumps(products), run_id))
+    """, params=(status, json.dumps(products), output_hash, run_id))
 
-    log.info(f"管线运行完成: run_id={run_id[:8]}, status={status}, products={products}")
+    log.info(f"管线运行完成: run_id={run_id[:8]}, status={status}, products={products}, output_hash={output_hash[:8] if output_hash else 'null'}")
 
 
 def run_pipeline(start_date: Optional[str] = None) -> Dict[str, Any]:
@@ -187,8 +273,13 @@ def run_pipeline(start_date: Optional[str] = None) -> Dict[str, Any]:
         products["freshness_tables"] = len(freshness_records)
         log.info(f"P5 完成: {len(freshness_records)} 张表")
 
-        # 6. 记录成功
-        finish_pipeline_run(run_id, "ok", products)
+        # 7. 计算产物哈希
+        log.info("Step 7/7: 计算产物哈希...")
+        output_hash = compute_output_hash(products)
+        log.info(f"产物哈希: {output_hash[:16]}")
+        
+        # 8. 记录成功
+        finish_pipeline_run(run_id, "ok", products, output_hash)
 
         summary = {
             "run_id": run_id,
@@ -249,14 +340,30 @@ def check_idempotency(run_id_1: str, run_id_2: str) -> bool:
         log.info("code_commit 不同，非幂等性测试场景")
         return False
 
-    # 比较 products
+    # 比较 products（行数）
     products_match = run1["products"] == run2["products"]
+    
+    # 比较 output_hash（内容）
+    output_hash_match = True
+    if run1.get("output_hash") and run2.get("output_hash"):
+        output_hash_match = run1["output_hash"] == run2["output_hash"]
+    elif run1.get("output_hash") or run2.get("output_hash"):
+        # 一个有 hash，一个没有，无法比较
+        output_hash_match = None
 
-    if products_match:
+    if products_match and output_hash_match:
         log.info(f"幂等性验证通过: run {run_id_1} == run {run_id_2}")
+        log.info(f"  products: {run1['products']}")
+        log.info(f"  output_hash: {run1.get('output_hash', 'null')[:16] if run1.get('output_hash') else 'null'}")
+        return True
     else:
         log.warning(f"幂等性验证失败: run {run_id_1} != run {run_id_2}")
+        log.warning(f"  products match: {products_match}")
+        log.warning(f"  output_hash match: {output_hash_match}")
         log.warning(f"  run1 products: {run1['products']}")
         log.warning(f"  run2 products: {run2['products']}")
-
-    return products_match
+        if run1.get("output_hash"):
+            log.warning(f"  run1 output_hash: {run1['output_hash'][:16]}")
+        if run2.get("output_hash"):
+            log.warning(f"  run2 output_hash: {run2['output_hash'][:16]}")
+        return False

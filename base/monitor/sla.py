@@ -294,29 +294,46 @@ class SLAManager:
             expected_time_str, check_date_tz, sla["sla_type"]
         )
 
-        # 查询实际刷新时间
+        # P1.4 修复: 查询数据实际日期(max_date)和监控时间(refreshed_at)
+        # 区分 data_freshness(数据实际日期) 和 monitor_freshness(监控检查时间)
         freshness_df = read_sql("""
-            SELECT refreshed_at
+            SELECT max_date, refreshed_at, status
             FROM public.data_freshness
             WHERE namespace = %s AND table_name = %s
         """, params=(namespace, table_name))
 
-        if freshness_df.empty or freshness_df.iloc[0]["refreshed_at"] is None:
-            # 没有刷新记录，视为违约
-            actual_refresh_time = None
+        if freshness_df.empty:
+            # 没有新鲜度记录,视为违约
+            actual_data_date = None
+            monitor_check_time = None
             delay_minutes = None
             is_violation = True
         else:
-            actual_refresh_time = freshness_df.iloc[0]["refreshed_at"]
-            if actual_refresh_time.tzinfo is None:
-                actual_refresh_time = tz.localize(actual_refresh_time)
-
-            # 计算延迟
-            delay = actual_refresh_time - expected_refresh_time
-            delay_minutes = int(delay.total_seconds() / 60)
-
-            # 判断是否违约（超过宽限期）
-            is_violation = delay_minutes > grace_period
+            row = freshness_df.iloc[0]
+            monitor_check_time = row["refreshed_at"]
+            
+            # P1.4: 用 max_date 作为数据实际日期
+            actual_data_date = row["max_date"]
+            
+            if actual_data_date is None:
+                # 没有 max_date(可能是没有 date_col 的表),用 status 判断
+                # 如果 status 是 fresh,不违约;否则违约
+                is_violation = row["status"] != "fresh"
+                delay_minutes = None
+            else:
+                # 将 max_date 转换为 datetime 用于比较
+                if isinstance(actual_data_date, date) and not isinstance(actual_data_date, datetime):
+                    actual_data_date = datetime.combine(actual_data_date, datetime.min.time())
+                
+                if actual_data_date.tzinfo is None:
+                    actual_data_date = tz.localize(actual_data_date)
+                
+                # 计算延迟(数据实际日期 vs 期望日期)
+                delay = actual_data_date - expected_refresh_time
+                delay_minutes = int(delay.total_seconds() / 60)
+                
+                # 判断是否违约(超过宽限期)
+                is_violation = delay_minutes > grace_period
 
         result = {
             "sla_id": sla["sla_id"],
@@ -324,7 +341,8 @@ class SLAManager:
             "table_name": table_name,
             "check_date": check_date_tz.date(),
             "expected_refresh_time": expected_refresh_time,
-            "actual_refresh_time": actual_refresh_time,
+            "actual_data_date": actual_data_date,  # P1.4: 数据实际日期
+            "monitor_check_time": monitor_check_time,  # P1.4: 监控检查时间
             "delay_minutes": delay_minutes,
             "is_violation": is_violation,
         }
@@ -421,11 +439,13 @@ class SLAManager:
             delay_minutes = EXCLUDED.delay_minutes,
             is_violation = EXCLUDED.is_violation
         """
+        # P1.4: 使用 actual_data_date 作为 actual_refresh_time 的值
+        # 保持表 schema 不变，但语义上存储的是数据实际日期
         params = (
             violation["sla_id"],
             violation["check_date"],
             violation["expected_refresh_time"],
-            violation["actual_refresh_time"],
+            violation.get("actual_data_date"),  # P1.4: 使用数据实际日期
             violation["delay_minutes"],
             violation["is_violation"],
         )

@@ -115,14 +115,36 @@ def collect_table_freshness(
             log.warning(f"获取 max_date 失败: {full_table}.{date_col}: {e}")
 
     # 判断 status
-    status = _determine_status(namespace, table_name, max_date)
+    # P1.4 修复: 当没有 date_col 但表有数据时,用 refreshed_at 作为代理指标
+    refreshed_at = datetime.now()
+    if max_date is None and row_count > 0 and not date_col:
+        # 没有日期列但有数据,尝试从 data_freshness 表查询上次的 refreshed_at
+        # 如果是首次采集,使用当前时间作为 refreshed_at,状态设为 fresh
+        prev_freshness = read_sql("""
+            SELECT refreshed_at, status
+            FROM public.data_freshness
+            WHERE namespace = %s AND table_name = %s
+        """, params=(namespace, table_name))
+        
+        if not prev_freshness.empty:
+            # 有历史记录,用上次的 refreshed_at 判断
+            prev_refreshed = prev_freshness.iloc[0]["refreshed_at"]
+            if prev_refreshed:
+                # 用 refreshed_at 代替 max_date 进行状态判断
+                status = _determine_status_by_refreshed(namespace, table_name, prev_refreshed)
+            else:
+                status = "fresh"  # 首次采集且有数据
+        else:
+            status = "fresh"  # 首次采集且有数据
+    else:
+        status = _determine_status(namespace, table_name, max_date)
 
     return {
         "namespace": namespace,
         "table_name": table_name,
         "max_date": max_date,
         "row_count": row_count,
-        "refreshed_at": datetime.now(),
+        "refreshed_at": refreshed_at,
         "status": status,
     }
 
@@ -143,6 +165,36 @@ def _determine_status(namespace: str, table_name: str, max_date: Optional[date])
         max_date = max_date.date()
 
     days_since = (today - max_date).days
+
+    if days_since <= threshold_days:
+        return "fresh"
+    elif days_since <= threshold_days * 2:
+        return "stale"
+    else:
+        return "missing"
+
+
+def _determine_status_by_refreshed(namespace: str, table_name: str, refreshed_at: datetime) -> str:
+    """P1.4: 根据上次刷新时间判断状态（用于没有日期列的表）。
+
+    对于没有 date_col 的表（如元数据表），用 refreshed_at 代替 max_date 判断。
+
+    Args:
+        namespace: 命名空间
+        table_name: 表名
+        refreshed_at: 上次刷新时间
+
+    Returns:
+        fresh / stale / missing
+    """
+    threshold_days = STALE_THRESHOLDS.get((namespace, table_name), DEFAULT_STALE_DAYS)
+    today = date.today()
+
+    if refreshed_at.tzinfo is not None:
+        refreshed_at = refreshed_at.replace(tzinfo=None)
+
+    refreshed_date = refreshed_at.date()
+    days_since = (today - refreshed_date).days
 
     if days_since <= threshold_days:
         return "fresh"

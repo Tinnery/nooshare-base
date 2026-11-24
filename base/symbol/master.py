@@ -62,14 +62,24 @@ def build_canonical_symbol() -> int:
     market_map = {'sh': 'XSHG', 'sz': 'XSHE', 'bj': 'BSE'}
     tong_meta['exchange'] = tong_meta['market'].map(market_map)
     
-    # 4. 合并
+    # 4. 合并（带 exchange 验证）
     merged = ju_stocks.merge(
-        tong_meta[['code', 'class']],
+        tong_meta[['code', 'class', 'exchange']],
         left_on='stock_code',
         right_on='code',
         how='left',
         suffixes=('_ju', '_tong')
     )
+    
+    # 验证 exchange 映射一致性
+    exchange_mismatches = merged[
+        (merged['exchange_ju'].notna()) & 
+        (merged['exchange_tong'].notna()) & 
+        (merged['exchange_ju'] != merged['exchange_tong'])
+    ]
+    if not exchange_mismatches.empty:
+        log.warning(f"检测到 {len(exchange_mismatches)} 条 exchange 映射冲突")
+        log.warning(f"示例: {exchange_mismatches[['stock_code', 'exchange_ju', 'exchange_tong']].head(5).to_dict('records')}")
     
     # 5. 构建 symbol（tong 风格：sh600000）
     # ju.stocks.exchange 是小写 sz/sh/bj，直接用作前缀
