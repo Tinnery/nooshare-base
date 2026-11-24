@@ -74,7 +74,7 @@ def create_limit_rule_pit(conn):
             COMMENT ON COLUMN public.limit_rule_pit.source IS '数据来源：ju.limit_ratio/manual';
         """)
         
-        # 回填数据：按 (security_type, exchange, start_date) 聚合
+        # 回填数据：按 (security_type, exchange) 聚合，检测规则变化点
         cur.execute("""
             WITH stock_type_mapping AS (
                 SELECT 
@@ -97,28 +97,39 @@ def create_limit_rule_pit(conn):
                     limit_ratio
                 FROM ju.limit_ratio
             ),
-            aggregated_rules AS (
+            -- 按 (security_type, exchange) 分组，取最常见的 limit_ratio
+            dominant_rules AS (
                 SELECT 
                     security_type,
                     exchange,
-                    start_date,
-                    COALESCE(
-                        MODE() WITHIN GROUP (ORDER BY limit_ratio) FILTER (WHERE limit_ratio != 5.0),
-                        MODE() WITHIN GROUP (ORDER BY limit_ratio)
-                    ) AS final_ratio,
-                    COUNT(*) AS stock_count
+                    MODE() WITHIN GROUP (ORDER BY limit_ratio) AS final_ratio
                 FROM stock_type_mapping
                 WHERE security_type != 'unknown'
-                GROUP BY security_type, exchange, start_date
+                GROUP BY security_type, exchange
+            ),
+            -- 检测规则变化点：找到每个 (security_type, exchange, limit_ratio) 组合的最早 start_date
+            rule_changes AS (
+                SELECT DISTINCT
+                    stm.security_type,
+                    stm.exchange,
+                    stm.limit_ratio,
+                    MIN(stm.start_date) AS effective_from
+                FROM stock_type_mapping stm
+                INNER JOIN dominant_rules dr 
+                    ON stm.security_type = dr.security_type 
+                    AND stm.exchange = dr.exchange
+                    AND stm.limit_ratio = dr.final_ratio
+                WHERE stm.security_type != 'unknown'
+                GROUP BY stm.security_type, stm.exchange, stm.limit_ratio
             )
             INSERT INTO public.limit_rule_pit (security_type, exchange, limit_ratio, effective_from, source)
             SELECT 
                 security_type,
                 exchange,
-                final_ratio / 100.0,
-                start_date,
-                'ju.limit_ratio_v1'
-            FROM aggregated_rules
+                limit_ratio / 100.0,
+                effective_from,
+                'ju.limit_ratio_v2'
+            FROM rule_changes
             ON CONFLICT DO NOTHING
         """)
         
