@@ -12,7 +12,7 @@ DB_CONFIG = {
     "host": "localhost",
     "port": 5432,
     "dbname": "nooshare_dev",
-    "user": "postgres",
+    "user": "travis",
 }
 
 
