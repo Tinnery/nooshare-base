@@ -113,6 +113,8 @@ def init_schema():
         high DOUBLE PRECISION,
         low DOUBLE PRECISION,
         close DOUBLE PRECISION,
+        volume BIGINT,
+        amount DOUBLE PRECISION,
         open_hfq DOUBLE PRECISION,
         high_hfq DOUBLE PRECISION,
         low_hfq DOUBLE PRECISION,
@@ -123,11 +125,36 @@ def init_schema():
         PRIMARY KEY (symbol, date)
     );
 
+    -- 交易日历（PIT）：记录每日是否开盘
+    CREATE TABLE IF NOT EXISTS public.trading_calendar (
+        cal_date DATE NOT NULL,
+        market TEXT NOT NULL DEFAULT 'CN',
+        is_open BOOLEAN NOT NULL,
+        effective_from TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        effective_to TIMESTAMPTZ,
+        PRIMARY KEY (cal_date, market, effective_from)
+    );
+
+    -- 涨跌停规则（PIT）：按证券类型和交易所记录涨跌停比例
+    CREATE TABLE IF NOT EXISTS public.limit_rule_pit (
+        rule_id SERIAL PRIMARY KEY,
+        security_type TEXT NOT NULL,
+        exchange TEXT NOT NULL,
+        limit_ratio NUMERIC(5,4) NOT NULL,
+        effective_from DATE NOT NULL,
+        effective_to DATE,
+        source TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (security_type, exchange, effective_from)
+    );
+
     -- 索引
     CREATE INDEX IF NOT EXISTS idx_canonical_symbol_symbol ON public.canonical_symbol(symbol);
     CREATE INDEX IF NOT EXISTS idx_corporate_action_event_canonical ON public.corporate_action_event(canonical_id, effective_date);
     CREATE INDEX IF NOT EXISTS idx_pipeline_run_started ON public.pipeline_run(started_at DESC);
     CREATE INDEX IF NOT EXISTS idx_hfq_daily_date ON public.hfq_daily(date);
+    CREATE INDEX IF NOT EXISTS idx_trading_calendar_date ON public.trading_calendar(cal_date);
+    CREATE INDEX IF NOT EXISTS idx_limit_rule_pit_type_exchange ON public.limit_rule_pit(security_type, exchange, effective_from);
     """
     execute_sql(tables_sql)
 
@@ -139,22 +166,30 @@ def init_schema():
     
     # 创建物化视图
     mv_sql = """
-    -- ST 状态物化视图：从 st_mark/st_remove 事件构建区间
+    -- ST 状态物化视图：只从 st_mark 生成区间，用下一个 st_remove 标记结束
+    -- 区间语义：[effective_from, effective_to)，即 effective_from <= as_of < effective_to
     CREATE MATERIALIZED VIEW IF NOT EXISTS public.st_status_pit AS
     SELECT
-        e.canonical_id,
+        mark.canonical_id,
         c.symbol,
-        e.effective_date AS effective_from,
-        LEAD(e.effective_date - INTERVAL '1 day') OVER (
-            PARTITION BY e.canonical_id ORDER BY e.effective_date
-        ) AS effective_to,
-        e.pub_date,
-        e.payload->>'st_type' AS st_type,
-        e.observed_at
-    FROM public.corporate_action_event e
-    JOIN public.canonical_symbol c ON c.canonical_id = e.canonical_id
-    WHERE e.event_type IN ('st_mark', 'st_remove')
-    ORDER BY e.canonical_id, e.effective_date;
+        mark.effective_date AS effective_from,
+        remove.effective_date AS effective_to,
+        mark.pub_date,
+        mark.payload->>'st_type' AS st_type,
+        mark.observed_at
+    FROM public.corporate_action_event mark
+    LEFT JOIN LATERAL (
+        SELECT e.effective_date
+        FROM public.corporate_action_event e
+        WHERE e.canonical_id = mark.canonical_id
+          AND e.event_type = 'st_remove'
+          AND e.effective_date > mark.effective_date
+        ORDER BY e.effective_date
+        LIMIT 1
+    ) remove ON true
+    JOIN public.canonical_symbol c ON c.canonical_id = mark.canonical_id
+    WHERE mark.event_type = 'st_mark'
+    ORDER BY mark.canonical_id, mark.effective_date;
 
     -- 估值数据物化视图：从 ju.valuation 投影，关联 canonical_id
     CREATE MATERIALIZED VIEW IF NOT EXISTS public.valuation_pit AS

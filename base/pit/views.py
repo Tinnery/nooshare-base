@@ -50,7 +50,7 @@ def query_st_status(as_of: Union[str, date, datetime]) -> pd.DataFrame:
     log.info(f"查询 ST 状态 as_of={as_of_str}")
 
     df = read_sql("""
-        SELECT canonical_id, code, effective_from, effective_to
+        SELECT canonical_id, symbol, effective_from, effective_to
         FROM public.st_status_pit
         WHERE effective_from <= %s
           AND (effective_to IS NULL OR effective_to > %s)
@@ -92,8 +92,8 @@ def query_financial_data(
     where_clause = " AND ".join(conditions) if conditions else "1=1"
 
     query = f"""
-        SELECT canonical_id, code, report_date, pub_date,
-               revenue, operating_revenue, operating_cost, operating_profit,
+        SELECT canonical_id, symbol, report_date, pub_date,
+               revenue, operating_revenue,
                net_profit, net_profit_parent, eps
         FROM public.income_statement_pit
         WHERE {where_clause}

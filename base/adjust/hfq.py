@@ -40,7 +40,7 @@ _CHUNK_ROWS = 5_000_000
 
 def load_prices(symbols: Optional[list] = None) -> pd.DataFrame:
     """读不复权日线（全市场或指定 symbol）。"""
-    sql = "SELECT symbol, date, open, high, low, close FROM tong.stock_daily"
+    sql = "SELECT symbol, date, open, high, low, close, volume, amount FROM tong.stock_daily"
     params = None
     if symbols:
         sql += " WHERE symbol = ANY(%s)"
@@ -187,6 +187,7 @@ def run(symbols: Optional[list] = None) -> dict:
 
     # ── 写库（分块 COPY upsert）─────────────────────────────────────────
     cols = ["symbol", "date", "open", "high", "low", "close",
+            "volume", "amount",
             "open_hfq", "high_hfq", "low_hfq", "close_hfq",
             "factor_cum", "hfq_return"]
     payload = out[cols]

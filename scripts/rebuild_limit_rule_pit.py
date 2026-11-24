@@ -25,53 +25,55 @@ def rebuild_limit_rule_pit(conn):
         cur.execute("TRUNCATE TABLE public.limit_rule_pit RESTART IDENTITY")
         print("✓ Cleared existing limit_rule_pit")
         
-        # 2. 重新填充：按 (security_type, exchange) 聚合，检测规则变化点
+        # 2. 重新填充：检测真实的规则变化点
+        # 修复：1) CASE 顺序（先判断更具体的 3 位前缀）2) limit_ratio 显式类型转换
+        #       3) 保留所有真实变化点，而不是只保留多数值
         cur.execute("""
             WITH stock_type_mapping AS (
                 SELECT 
                     stock_code,
                     CASE 
                         WHEN LEFT(stock_code, 3) IN ('688', '689') THEN 'star_market'
-                        WHEN LEFT(stock_code, 1) = '6' THEN 'main_board'
                         WHEN LEFT(stock_code, 3) IN ('300', '301') THEN 'chi_next'
+                        WHEN LEFT(stock_code, 1) = '6' THEN 'main_board'
                         WHEN LEFT(stock_code, 1) = '0' THEN 'main_board'
                         WHEN LEFT(stock_code, 1) IN ('8', '4') THEN 'bse'
                         ELSE 'unknown'
                     END AS security_type,
                     CASE 
-                        WHEN LEFT(stock_code, 1) IN ('6', '8') THEN 'sh'
                         WHEN LEFT(stock_code, 1) IN ('0', '3') THEN 'sz'
+                        WHEN LEFT(stock_code, 1) = '6' THEN 'sh'
                         WHEN LEFT(stock_code, 1) IN ('8', '4') THEN 'bj'
                         ELSE 'unknown'
                     END AS exchange,
                     start_date,
-                    limit_ratio
+                    CAST(limit_ratio AS NUMERIC) AS limit_ratio
                 FROM ju.limit_ratio
+                WHERE limit_ratio IS NOT NULL AND start_date IS NOT NULL
             ),
-            -- 按 (security_type, exchange) 分组，取最常见的 limit_ratio
-            dominant_rules AS (
+            -- 按 (security_type, exchange) 分组，按日期排序，检测规则变化
+            ordered_rules AS (
                 SELECT 
                     security_type,
                     exchange,
-                    MODE() WITHIN GROUP (ORDER BY limit_ratio) AS final_ratio
+                    start_date,
+                    limit_ratio,
+                    LAG(limit_ratio) OVER (
+                        PARTITION BY security_type, exchange 
+                        ORDER BY start_date
+                    ) AS prev_ratio
                 FROM stock_type_mapping
                 WHERE security_type != 'unknown'
-                GROUP BY security_type, exchange
             ),
-            -- 检测规则变化点：找到每个 (security_type, exchange, limit_ratio) 组合的最早 start_date
+            -- 只保留规则发生变化的点（第一次出现或与前一次不同）
             rule_changes AS (
-                SELECT DISTINCT
-                    stm.security_type,
-                    stm.exchange,
-                    stm.limit_ratio,
-                    MIN(stm.start_date) AS effective_from
-                FROM stock_type_mapping stm
-                INNER JOIN dominant_rules dr 
-                    ON stm.security_type = dr.security_type 
-                    AND stm.exchange = dr.exchange
-                    AND stm.limit_ratio = dr.final_ratio
-                WHERE stm.security_type != 'unknown'
-                GROUP BY stm.security_type, stm.exchange, stm.limit_ratio
+                SELECT 
+                    security_type,
+                    exchange,
+                    limit_ratio,
+                    start_date AS effective_from
+                FROM ordered_rules
+                WHERE prev_ratio IS NULL OR prev_ratio != limit_ratio
             )
             INSERT INTO public.limit_rule_pit (security_type, exchange, limit_ratio, effective_from, source)
             SELECT 
@@ -79,7 +81,7 @@ def rebuild_limit_rule_pit(conn):
                 exchange,
                 limit_ratio / 100.0,
                 effective_from,
-                'ju.limit_ratio_v2'
+                'ju.limit_ratio_v3'
             FROM rule_changes
         """)
         
