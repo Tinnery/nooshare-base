@@ -14,7 +14,9 @@ yaml = YAML()
 yaml.preserve_quotes = True
 
 CONTRACTS_DIR = Path(__file__).parent.parent / "contracts"
-DOCS_DIR = Path(__file__).parent.parent / "docs"
+DOCS_DIR = Path(os.environ.get(
+    "NOOSHARE_DOCS_OUT", str(Path(__file__).parent.parent / ".generated")
+))
 
 
 def load_contract(yaml_path: Path) -> dict:

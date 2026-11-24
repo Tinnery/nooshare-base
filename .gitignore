@@ -1,3 +1,6 @@
+# 本地生成的文字材料（正式版本在 nooshare-design）
+.generated/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

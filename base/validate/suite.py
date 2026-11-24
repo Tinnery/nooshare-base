@@ -5,7 +5,7 @@
   - V11（幂等）—— 由 pipeline.runner.check_idempotency 承担
   - 外部对账 V1–V8 —— 依赖外部数据源接入，由 reconcile.runner 承担
 
-标准与阈值见 deliverables/01-需求说明书 §5。
+标准与阈值见 nooshare-design 的 implementation-docs/nooshare-base/01-需求说明书-nooshare-base.md §5。
 """
 import logging
 import math

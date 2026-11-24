@@ -4,8 +4,10 @@ schema_version: 2
 #
 # 原则：
 #   1. 权威只持一份 —— 系统职责与跨仓边界以 nooshare-design 为 normative 权威，本 repo 只引用，不复制。
-#   2. 本 repo 的 normative 权威是 contracts/（数据产品契约）、AGENTS.md（铁律）与 README 的分层铁律。
-#   3. 与上游的结构继承关系、已知坑清单见 docs/UPSTREAM_LINKAGE.md。
+#   2. 本 repo 的 normative 权威是 contracts/（数据产品契约）与 AGENTS.md（铁律）。
+#   3. 公共仓库禁止文档目录与文字材料；需求、数据字典、CLI 参考、使用示例等已迁出到
+#      nooshare-design/implementation-docs/nooshare-base/，本 repo 只通过 AGENTS.md 索引。
+#   4. 上游结构关系与坑清单见 nooshare-design/data-flow/。
 
 project:
   name: nooshare-base
@@ -19,19 +21,12 @@ resources:
     kind: agent-rules
     status: current
     authority: normative
-    read_when: Agent 会话进入本 repo 时首先装载；权威路由与五条铁律。
+    read_when: Agent 会话进入本 repo 时首先装载；权威路由、五条铁律与公共仓库文档禁令。
   - path: README.md
     kind: repo-governance
     status: current
     authority: normative
-    read_when: 首次接触本 repo；需要分层铁律、职责边界与知识导航时。
-
-  # ── 方向 / 需求层 ──
-  - path: deliverables/01-需求说明书-nooshare-base.md
-    kind: requirements
-    status: delivered
-    authority: normative
-    read_when: 理解 P1-P7 目标、"Deeper not bigger"原则或 Out of Scope 边界时。P1-P7 已实现交付。
+    read_when: 首次接触本 repo；需要一句话定位时。
 
   # ── 控制层（契约冻结）──
   - path: contracts/
@@ -39,38 +34,26 @@ resources:
     status: current
     authority: normative
     read_when: 修改任何表结构前；下游编写查询前；上游疑似变更后。public_* 为本 repo 产出契约，ju/tong/finance 为上游消费契约。
-  - path: docs/UPSTREAM_LINKAGE.md
+
+  # ── 外部文字材料（唯一归属 nooshare-design）──
+  - path: nooshare-design/implementation-docs/nooshare-base/
+    repo: nooshare-design
+    kind: text-materials
+    status: current
+    authority: normative
+    read_when: 需要需求说明书、数据字典、API 参考、使用示例、契约目录说明或文档索引时；先按 workspace.yaml 定位 nooshare-design checkout。
+  - path: nooshare-design/data-flow/matrix-data-flow.md
+    repo: nooshare-design
     kind: upstream-linkage
     status: current
     authority: normative
-    read_when: 新会话首次进入本 repo；调试列名/类型错误；评估上游结构变更影响时。
-  - path: docs/OVERVIEW.md
-    kind: repo-overview
+    read_when: 新会话首次进入本 repo；评估上游结构变更影响时。
+  - path: nooshare-design/data-flow/upstream-pitfalls.md
+    repo: nooshare-design
+    kind: upstream-pitfalls
     status: current
     authority: normative
-    read_when: 需要目录职责、输入输出契约、SLO 与发布变更原则全貌时（README 精简后承接其细节）。
-
-  # ── 工程事实层 ──
-  - path: docs/DATA_DICTIONARY.md
-    kind: data-dictionary
-    status: current
-    authority: factual-reference
-    read_when: 首次接触 public.* 各表的列定义、约束、索引与 PIT 语义时。由 scripts/generate_docs.py 从契约自动生成，勿手改。
-  - path: docs/API_REFERENCE.md
-    kind: cli-reference
-    status: current
-    authority: factual-reference
-    read_when: 使用 13 个 CLI 命令（init-db/build/reconcile/freshness/hfq/validate/monitor/backtest/contract-test/benchmark/lineage/sla/dashboard）时。
-  - path: docs/USAGE_EXAMPLES.md
-    kind: usage-examples
-    status: current
-    authority: factual-reference
-    read_when: 编写典型查询（ST 历史/估值 PIT/复权/财报 as-of）时。
-  - path: docs/README.md
-    kind: docs-index
-    status: current
-    authority: factual-reference
-    read_when: 需要文档导航时。
+    read_when: 调试列名/类型错误；排查上游数据坑时。
 
   # ── 关键代码入口（DDL 与管线的事实来源）──
   - path: base/db.py
@@ -87,4 +70,4 @@ resources:
     kind: docs-generator
     status: current
     authority: factual-reference
-    read_when: 契约变更后需要重新生成 docs/ 三件套时。
+    read_when: 契约变更后需要重新生成文字材料时；默认写入被忽略的 .generated/，正式版本输出到 nooshare-design/implementation-docs/nooshare-base/。
