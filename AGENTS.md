@@ -53,3 +53,7 @@
   - 需要更新 nooshare-design 中的正式版本时，设置 `NOOSHARE_DOCS_OUT=<nooshare-design checkout>/implementation-docs/nooshare-base` 后重新生成，并在 design 仓提交。
 - 测试：uv run pytest。
 - CI：GitHub Actions 在合成数据上运行，不依赖生产数据库。
+
+## 主机约束
+
+本仓库只在 pro 主机开发和运行。禁止 clone 到 Windows 主机（travis-hp）。如果在 Windows 主机上发现本仓库的 checkout，应删除该 checkout 并修正来源（不正确的 clone 操作或 workspace 配置）。
