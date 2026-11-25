@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS ju.valuation (
 CREATE TABLE IF NOT EXISTS tong.symbol_meta (symbol TEXT, class TEXT);
 CREATE TABLE IF NOT EXISTS tong.stock_daily (
     symbol TEXT, date INTEGER,
-    open NUMERIC, high NUMERIC, low NUMERIC, close NUMERIC
+    open NUMERIC, high NUMERIC, low NUMERIC, close NUMERIC,
+    volume BIGINT, amount NUMERIC
 );
 CREATE TABLE IF NOT EXISTS tong.index_daily (symbol TEXT, date INTEGER, close NUMERIC);
 CREATE TABLE IF NOT EXISTS tong.etf_daily (symbol TEXT, date INTEGER, close NUMERIC);
@@ -116,14 +117,14 @@ INSERT INTO ju.valuation VALUES
 
 -- 4 个连续交易日日线（V9 需要每股 >= 3 行正价格）
 INSERT INTO tong.stock_daily VALUES
-    ('sh600000', 20240102, 10.00, 10.20,  9.90, 10.10),
-    ('sh600000', 20240103, 10.10, 10.40, 10.00, 10.30),
-    ('sh600000', 20240104,  9.95, 10.10,  9.80,  9.90),
-    ('sh600000', 20240105,  9.90, 10.05,  9.85, 10.00),
-    ('sz000001', 20240102, 11.00, 11.20, 10.90, 11.00),
-    ('sz000001', 20240103, 11.00, 11.30, 10.95, 11.20),
-    ('sz000001', 20240104, 11.20, 11.40, 11.00, 11.30),
-    ('sz000001', 20240105,  7.55,  7.70,  7.40,  7.60);
+    ('sh600000', 20240102, 10.00, 10.20,  9.90, 10.10, 1000000, 10100000),
+    ('sh600000', 20240103, 10.10, 10.40, 10.00, 10.30, 1100000, 11330000),
+    ('sh600000', 20240104,  9.95, 10.10,  9.80,  9.90,  900000,  8910000),
+    ('sh600000', 20240105,  9.90, 10.05,  9.85, 10.00, 1050000, 10500000),
+    ('sz000001', 20240102, 11.00, 11.20, 10.90, 11.00,  800000,  8800000),
+    ('sz000001', 20240103, 11.00, 11.30, 10.95, 11.20,  850000,  9520000),
+    ('sz000001', 20240104, 11.20, 11.40, 11.00, 11.30,  900000, 10170000),
+    ('sz000001', 20240105,  7.55,  7.70,  7.40,  7.60, 1200000,  9120000);
 
 INSERT INTO tong.index_daily VALUES
     ('sh000001', 20240102, 2960.00), ('sh000001', 20240103, 2970.00);
