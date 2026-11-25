@@ -1,5 +1,5 @@
 contract: public.hfq_daily
-version: 1
+version: 2
 description: 后复权价格序列（P3 扩展），由 tong.gbbq category=1 事件累乘因子生成
 type: table
 columns:
@@ -9,6 +9,8 @@ columns:
   - {name: high,       type: DOUBLE PRECISION, nullable: true,  semantic: 原始高价}
   - {name: low,        type: DOUBLE PRECISION, nullable: true,  semantic: 原始低价}
   - {name: close,      type: DOUBLE PRECISION, nullable: true,  semantic: 原始收盘价}
+  - {name: volume,     type: BIGINT,          nullable: true,  semantic: 原始成交量，透传上游 tong.stock_daily（待确认计量单位：股或手）}
+  - {name: amount,     type: DOUBLE PRECISION, nullable: true,  semantic: 原始成交额，透传上游 tong.stock_daily}
   - {name: open_hfq,   type: DOUBLE PRECISION, nullable: true,  semantic: 后复权开价 = open * factor_cum}
   - {name: high_hfq,   type: DOUBLE PRECISION, nullable: true,  semantic: 后复权高价}
   - {name: low_hfq,    type: DOUBLE PRECISION, nullable: true,  semantic: 后复权低价}
@@ -28,9 +30,16 @@ calculation: |
   ±11% 通过率 99.92% vs 88.97%）：c1=每10股派息, c2=配股价, c3=每10股送转, c4=每10股配股。
   残余异常（~0.08% 事件，如 gbbq 漏记送转导致除权假跳空）为源数据质量项，
   由 hfq 自检 extreme_hfq_return_rows_2019plus 报告，不静默修正。
+  
+  v2 变更（2026-11-25）：
+  - 新增 volume 和 amount 字段，透传上游 tong.stock_daily 原始成交量和成交额
+  - 这两个字段是原始事实，不因 HFQ 价格复权而调整
+  - 成交量计量单位待确认（股或手），不应直接用 factor_cum 调整（因子包含现金分红）
 known_deviations: |
   - stock_daily 自 2008 起，更早事件因子按 1 跳过：不影响逐日收益率，影响绝对价格水平。
   - public.corporate_action_event 的 dividend 投影覆盖（1,139 条）远小于 tong.gbbq
     category=1（69,398 条），P2 投影覆盖缺口属对账发现，另行处置。
+  - v1 → v2 迁移：旧表缺少 volume/amount 列，需执行 ALTER TABLE 添加；旧行字段值为 NULL，
+    需重新运行 base hfq 全量重算回填。
 refresh_strategy: base hfq 全量重算（幂等 upsert），stock_daily 或 gbbq 更新后重跑
-consumers: [downstream strategy module]
+consumers: [nooshare-indicators, nooshare-strategy, downstream strategy module]

@@ -191,6 +191,11 @@ def run(symbols: Optional[list] = None) -> dict:
             "open_hfq", "high_hfq", "low_hfq", "close_hfq",
             "factor_cum", "hfq_return"]
     payload = out[cols]
+    
+    # 将 volume 从浮点数转换为整数（tong.stock_daily 的 numeric 类型被 pandas 读为 float）
+    if "volume" in payload.columns:
+        payload["volume"] = payload["volume"].round().astype("int64")
+    
     for i in range(0, len(payload), _CHUNK_ROWS):
         chunk = payload.iloc[i:i + _CHUNK_ROWS]
         copy_upsert(chunk.reset_index(drop=True), "public", "hfq_daily")

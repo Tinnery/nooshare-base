@@ -158,6 +158,18 @@ def init_schema():
     """
     execute_sql(tables_sql)
 
+    # v1 → v2 迁移：为旧表添加 volume 和 amount 列（如果不存在）
+    # 这确保旧数据库也能升级到契约 v2，而不仅限于新建数据库
+    migration_sql = """
+    ALTER TABLE public.hfq_daily
+        ADD COLUMN IF NOT EXISTS volume BIGINT;
+    
+    ALTER TABLE public.hfq_daily
+        ADD COLUMN IF NOT EXISTS amount DOUBLE PRECISION;
+    """
+    execute_sql(migration_sql)
+    log.info("hfq_daily v1→v2 迁移完成：volume/amount 列已添加（如不存在）")
+
     # P3: 物化 PIT 视图
     # 先删除旧视图（如果存在）
     execute_sql("DROP VIEW IF EXISTS public.canonical_symbol_pit CASCADE;")
