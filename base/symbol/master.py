@@ -81,25 +81,57 @@ def build_canonical_symbol() -> int:
         log.warning(f"检测到 {len(exchange_mismatches)} 条 exchange 映射冲突")
         log.warning(f"示例: {exchange_mismatches[['stock_code', 'exchange_ju', 'exchange_tong']].head(5).to_dict('records')}")
     
-    # 5. 构建 symbol（tong 风格：sh600000）
-    # ju.stocks.exchange 是小写 sz/sh/bj，直接用作前缀
+    # 5. 合并 exchange：ju 为权威源，tong 为交叉验证回退
+    # ju.stocks.exchange 是小写 sh/sz/bj；tong 推导的是大写 XSHG/XSHE/BSE
+    # 统一为小写 sh/sz/bj 输出
+    _TONG_TO_LOWER = {'XSHG': 'sh', 'XSHE': 'sz', 'BSE': 'bj'}
+    
+    def _normalise_exchange(row):
+        ju_val = row['exchange_ju']
+        tong_val = row['exchange_tong']
+        if pd.notna(ju_val):
+            return str(ju_val).lower()
+        if pd.notna(tong_val):
+            mapped = _TONG_TO_LOWER.get(str(tong_val))
+            if mapped:
+                return mapped
+            # tong 值无法识别
+            return None
+        return None
+    
+    merged['exchange_resolved'] = merged.apply(_normalise_exchange, axis=1)
+    
+    # 报告无法解析的行
+    unresolvable = merged[merged['exchange_resolved'].isna()]
+    if not unresolvable.empty:
+        log.warning(f"{len(unresolvable)} 条记录无法解析 exchange（两源均缺失或不可识别）")
+    
+    # 6. 构建 symbol（tong 风格：sh600000）
+    _PREFIX_MAP = {'sh': 'sh', 'xshg': 'sh', 'sz': 'sz', 'xshe': 'sz', 'bj': 'bj', 'bse': 'bj'}
+    
     def infer_symbol(row):
-        exchange = str(row['exchange']).lower()
-        if exchange in ('sh', 'xshg'):
-            prefix = 'sh'
-        elif exchange in ('bj', 'bse'):
-            prefix = 'bj'
-        else:
-            prefix = 'sz'  # 默认 sz（含 xshe）
+        ex = row['exchange_resolved']
+        if ex is None or pd.isna(ex):
+            log.warning(f"无法推断 symbol: stock_code={row['stock_code']}，exchange 缺失，跳过")
+            return None
+        prefix = _PREFIX_MAP.get(str(ex).lower())
+        if prefix is None:
+            log.warning(f"无法推断 symbol: stock_code={row['stock_code']}，exchange={ex!r} 不可识别，跳过")
+            return None
         return f"{prefix}{row['stock_code']}"
     
     merged['symbol'] = merged.apply(infer_symbol, axis=1)
     merged['asset_class'] = merged['class'].fillna('stock')
     
-    # 6. 构建最终 DataFrame
+    # 7. 构建最终 DataFrame（丢弃无法推断 symbol 的行）
+    before_drop = len(merged)
+    merged = merged.dropna(subset=['symbol'])
+    if len(merged) < before_drop:
+        log.warning(f"丢弃 {before_drop - len(merged)} 条无法推断 symbol 的记录")
+    
     result = pd.DataFrame({
         'canonical_id': merged['stock_code'],
-        'exchange': merged['exchange'],
+        'exchange': merged['exchange_resolved'],
         'code': merged['stock_code'],
         'symbol': merged['symbol'],
         'asset_class': merged['asset_class'],
