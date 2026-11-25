@@ -112,6 +112,11 @@ jobs:
 
           execute_sql("""
               ALTER TABLE ju.trading_day
+              ALTER COLUMN trade_date TYPE DATE
+              USING to_date(trade_date, 'YYYYMMDD')
+          """)
+          execute_sql("""
+              ALTER TABLE ju.trading_day
               ADD COLUMN IF NOT EXISTS is_trading_day BOOLEAN NOT NULL DEFAULT TRUE
           """)
           execute_sql("""
