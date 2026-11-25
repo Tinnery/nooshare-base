@@ -196,8 +196,8 @@ def init_schema():
     SELECT
         c.canonical_id,
         c.symbol,
-        v.start_date AS effective_from,
-        v.end_date AS effective_to,
+        to_date(v.start_date, 'YYYYMMDD') AS effective_from,
+        to_date(v.end_date, 'YYYYMMDD') AS effective_to,
         v.capitalization,
         v.circulating_cap,
         v.refreshed_at AS observed_at
