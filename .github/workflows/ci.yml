@@ -100,6 +100,7 @@ jobs:
       - name: Create isolated DEV-compatible database role
         run: |
           PGPASSWORD=postgres psql -h 127.0.0.1 -p 5432 -U postgres -d nooshare_dev -v ON_ERROR_STOP=1 -c "CREATE ROLE travis LOGIN"
+          PGPASSWORD=postgres psql -h 127.0.0.1 -p 5432 -U postgres -d nooshare_dev -v ON_ERROR_STOP=1 -c "ALTER DATABASE nooshare_dev OWNER TO travis"
 
       - name: Load synthetic CI fixture (ju/tong/finance, no real data)
         run: uv run python scripts/ci_fixture.py
