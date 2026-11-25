@@ -105,6 +105,35 @@ jobs:
       - name: Load synthetic CI fixture (ju/tong/finance, no real data)
         run: uv run python scripts/ci_fixture.py
 
+      - name: Complete synthetic PIT migration inputs
+        run: |
+          uv run python - <<'PY'
+          from base.db import execute_sql
+
+          execute_sql("""
+              ALTER TABLE ju.trading_day
+              ADD COLUMN IF NOT EXISTS is_trading_day BOOLEAN NOT NULL DEFAULT TRUE
+          """)
+          execute_sql("""
+              CREATE TABLE IF NOT EXISTS ju.limit_ratio (
+                  stock_code TEXT NOT NULL,
+                  start_date DATE NOT NULL,
+                  limit_ratio NUMERIC NOT NULL
+              )
+          """)
+          execute_sql("DELETE FROM ju.limit_ratio")
+          execute_sql("""
+              INSERT INTO ju.limit_ratio (stock_code, start_date, limit_ratio)
+              VALUES
+                  ('600000', '2008-02-28', 10),
+                  ('000001', '2008-02-28', 10),
+                  ('300001', '2020-08-24', 20),
+                  ('688001', '2019-07-29', 20),
+                  ('830799', '2021-11-15', 30)
+          """)
+          print("Synthetic PIT migration inputs ready.")
+          PY
+
       - name: Initialize database schema
         run: uv run base init-db
 
