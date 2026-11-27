@@ -152,33 +152,50 @@ def extract_gbbq_events() -> pd.DataFrame:
                 all_zero_count += 1
                 continue
 
+            # source_action_key: 原始 GBBQ 记录身份（symbol+date+category），
+            # 拆分出的 dividend/split/rights_issue 共享同一 key，
+            # 供 PIT 因子按组合公式一次计算，不拆开相乘。
+            source_action_key = f"tong.gbbq|{row['symbol']}|{row['date']}|{int(category)}"
+            full_payload = {
+                "c1": c1, "c2": c2, "c3": c3, "c4": c4,
+                "category": int(category),
+                "source_action_key": source_action_key,
+                "source_symbol": row["symbol"],
+            }
+
             # c1 > 0 → dividend
             if c1 > 0:
+                _p = dict(full_payload)
+                _p["cash_per_10"] = c1
                 events.append({
                     "canonical_id": code,
                     "event_type": "dividend",
                     "effective_date": eff_date,
-                    "payload": {"cash_per_10": c1},
+                    "payload": _p,
                     "source_id": "tong",
                 })
 
             # c3 > 0 → split
             if c3 > 0:
+                _p = dict(full_payload)
+                _p.update({"bonus_per_10": 0.0, "convert_per_10": c3})
                 events.append({
                     "canonical_id": code,
                     "event_type": "split",
                     "effective_date": eff_date,
-                    "payload": {"bonus_per_10": 0.0, "convert_per_10": c3},
+                    "payload": _p,
                     "source_id": "tong",
                 })
 
             # c4 > 0 → rights_issue
             if c4 > 0:
+                _p = dict(full_payload)
+                _p.update({"rights_shares_per_10": c4, "rights_price": c2})
                 events.append({
                     "canonical_id": code,
                     "event_type": "rights_issue",
                     "effective_date": eff_date,
-                    "payload": {"rights_shares_per_10": c4, "rights_price": c2},
+                    "payload": _p,
                     "source_id": "tong",
                 })
 

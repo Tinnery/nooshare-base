@@ -303,6 +303,40 @@ def init_schema():
     """
     execute_sql(mv_sql)
 
+    # P1 (OHLCV): 统一 Raw 行情消费接口。基于 tong 三源表 UNION ALL，
+    # 保留 source_id / 原始分类，不复制物理数据，不含复权列。幂等。
+    view_sql = """
+    CREATE OR REPLACE VIEW public.market_daily_bar AS
+    SELECT d.symbol, d.date, 'equity'::text AS asset_family,
+        CASE WHEN m.class IN ('stock','bstock') THEN m.class ELSE 'unknown' END AS asset_class,
+        m.class AS source_asset_class, d.source AS source_id,
+        d.open, d.high, d.low, d.close, d.volume, d.amount,
+        d.ingested_at AS source_observed_at, 'tong.stock_daily'::text AS source_relation,
+        CASE WHEN m.class IS NOT NULL THEN 'confirmed' ELSE 'unknown' END AS classification_status
+    FROM tong.stock_daily d
+    LEFT JOIN tong.symbol_meta m ON m.symbol = d.symbol AND m.source = d.source
+    UNION ALL
+    SELECT d.symbol, d.date, 'index'::text,
+        CASE WHEN m.class IN ('index','block') THEN m.class ELSE 'unknown' END,
+        m.class, d.source, d.open, d.high, d.low, d.close, d.volume, d.amount,
+        d.ingested_at, 'tong.index_daily'::text,
+        CASE WHEN m.class IS NOT NULL THEN 'confirmed' ELSE 'unknown' END
+    FROM tong.index_daily d
+    LEFT JOIN tong.symbol_meta m ON m.symbol = d.symbol AND m.source = d.source
+    UNION ALL
+    SELECT d.symbol, d.date, 'fund'::text,
+        CASE WHEN m.class = 'etf' THEN m.class ELSE 'unknown' END,
+        m.class, d.source, d.open, d.high, d.low, d.close, d.volume, d.amount,
+        d.ingested_at, 'tong.etf_daily'::text,
+        CASE WHEN m.class IS NOT NULL THEN 'confirmed' ELSE 'unknown' END
+    FROM tong.etf_daily d
+    LEFT JOIN tong.symbol_meta m ON m.symbol = d.symbol AND m.source = d.source
+    
+    """
+    execute_sql(view_sql)
+    log.info("market_daily_bar 统一 Raw 行情视图已创建/更新（幂等）")
+
+
 
 def refresh_materialized_views():
     """刷新所有物化 PIT 视图。在 pipeline 构建完成后调用。"""
