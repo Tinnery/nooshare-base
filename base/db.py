@@ -45,8 +45,9 @@ def init_schema():
     tables_sql = """
     -- P1: 规范符号主数据
     CREATE TABLE IF NOT EXISTS public.canonical_symbol (
-        canonical_id TEXT PRIMARY KEY,
+        canonical_id TEXT NOT NULL,
         exchange TEXT NOT NULL,
+        PRIMARY KEY (exchange, canonical_id),
         code TEXT NOT NULL,
         symbol TEXT NOT NULL,
         asset_class TEXT,
@@ -59,7 +60,8 @@ def init_schema():
     -- P2: 公司行为事件溯源
     CREATE TABLE IF NOT EXISTS public.corporate_action_event (
         event_id TEXT PRIMARY KEY,
-        canonical_id TEXT NOT NULL REFERENCES public.canonical_symbol(canonical_id),
+        canonical_id TEXT NOT NULL,
+        exchange TEXT NOT NULL,
         event_type TEXT NOT NULL,
         effective_date DATE NOT NULL,
         pub_date DATE,
@@ -67,7 +69,8 @@ def init_schema():
         payload JSONB,
         source_id TEXT,
         created_at TIMESTAMPTZ DEFAULT now(),
-        UNIQUE (canonical_id, event_type, effective_date, source_id)
+        FOREIGN KEY (exchange, canonical_id) REFERENCES public.canonical_symbol(exchange, canonical_id),
+        UNIQUE (exchange, canonical_id, event_type, effective_date, source_id)
     );
 
     -- P4: 跨源对账状态
@@ -183,6 +186,7 @@ def init_schema():
     CREATE MATERIALIZED VIEW IF NOT EXISTS public.st_status_pit AS
     SELECT
         mark.canonical_id,
+        mark.exchange,
         c.symbol,
         mark.effective_date AS effective_from,
         remove.effective_date AS effective_to,
@@ -193,13 +197,14 @@ def init_schema():
     LEFT JOIN LATERAL (
         SELECT e.effective_date
         FROM public.corporate_action_event e
-        WHERE e.canonical_id = mark.canonical_id
+        WHERE e.exchange = mark.exchange
+          AND e.canonical_id = mark.canonical_id
           AND e.event_type = 'st_remove'
           AND e.effective_date > mark.effective_date
         ORDER BY e.effective_date
         LIMIT 1
     ) remove ON true
-    JOIN public.canonical_symbol c ON c.canonical_id = mark.canonical_id
+    JOIN public.canonical_symbol c ON c.exchange = mark.exchange AND c.canonical_id = mark.canonical_id
     WHERE mark.event_type = 'st_mark'
     ORDER BY mark.canonical_id, mark.effective_date;
 
@@ -214,7 +219,7 @@ def init_schema():
         v.circulating_cap,
         v.refreshed_at AS observed_at
     FROM ju.valuation v
-    JOIN public.canonical_symbol c ON c.code = v.stock_code
+    JOIN public.canonical_symbol c ON c.code = v.stock_code AND c.asset_class = 'stock'
     ORDER BY c.canonical_id, v.start_date;
 
     -- 复权因子物化视图：从 dividend/split/rights_issue 事件构建
@@ -222,13 +227,14 @@ def init_schema():
     CREATE MATERIALIZED VIEW IF NOT EXISTS public.adjustment_factor_pit AS
     SELECT
         e.canonical_id,
+        e.exchange,
         c.symbol,
         e.effective_date,
         e.event_type,
         e.payload,
         e.observed_at
     FROM public.corporate_action_event e
-    JOIN public.canonical_symbol c ON c.canonical_id = e.canonical_id
+    JOIN public.canonical_symbol c ON c.exchange = e.exchange AND c.canonical_id = e.canonical_id
     WHERE e.event_type IN ('dividend', 'split', 'rights_issue')
     ORDER BY e.canonical_id, e.effective_date;
 
@@ -246,7 +252,7 @@ def init_schema():
         i.eps,
         i.created_at AS observed_at
     FROM finance.income_statement i
-    JOIN public.canonical_symbol c ON c.code = i.code
+    JOIN public.canonical_symbol c ON c.code = i.code AND c.asset_class = 'stock'
     ORDER BY c.canonical_id, i.report_date;
 
     -- 财务报表 PIT 视图：资产负债表
@@ -262,7 +268,7 @@ def init_schema():
         b.shareholders_equity,
         b.created_at AS observed_at
     FROM finance.balance_sheet b
-    JOIN public.canonical_symbol c ON c.code = b.code
+    JOIN public.canonical_symbol c ON c.code = b.code AND c.asset_class = 'stock'
     ORDER BY c.canonical_id, b.report_date;
 
     -- 财务报表 PIT 视图：现金流量表
@@ -278,15 +284,15 @@ def init_schema():
         cf.net_cash_flow,
         cf.created_at AS observed_at
     FROM finance.cash_flow cf
-    JOIN public.canonical_symbol c ON c.code = cf.code
+    JOIN public.canonical_symbol c ON c.code = cf.code AND c.asset_class = 'stock'
     ORDER BY c.canonical_id, cf.report_date;
 
     -- 物化视图索引
-    CREATE INDEX IF NOT EXISTS idx_st_status_pit_canonical ON public.st_status_pit(canonical_id, effective_from);
+    CREATE INDEX IF NOT EXISTS idx_st_status_pit_canonical ON public.st_status_pit(exchange, canonical_id, effective_from);
     CREATE INDEX IF NOT EXISTS idx_st_status_pit_symbol ON public.st_status_pit(symbol, effective_from);
     CREATE INDEX IF NOT EXISTS idx_valuation_pit_canonical ON public.valuation_pit(canonical_id, effective_from);
     CREATE INDEX IF NOT EXISTS idx_valuation_pit_symbol ON public.valuation_pit(symbol, effective_from);
-    CREATE INDEX IF NOT EXISTS idx_adjustment_factor_pit_canonical ON public.adjustment_factor_pit(canonical_id, effective_date);
+    CREATE INDEX IF NOT EXISTS idx_adjustment_factor_pit_canonical ON public.adjustment_factor_pit(exchange, canonical_id, effective_date);
     CREATE INDEX IF NOT EXISTS idx_adjustment_factor_pit_symbol ON public.adjustment_factor_pit(symbol, effective_date);
     CREATE INDEX IF NOT EXISTS idx_income_statement_pit_canonical ON public.income_statement_pit(canonical_id, report_date);
     CREATE INDEX IF NOT EXISTS idx_income_statement_pit_symbol ON public.income_statement_pit(symbol, report_date);

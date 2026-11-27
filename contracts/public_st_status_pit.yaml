@@ -1,9 +1,10 @@
 contract: public.st_status_pit
-version: 1
+version: 2
 description: ST 状态物化 PIT 视图（P3）
 type: materialized_view
 columns:
   - {name: canonical_id,   type: TEXT, nullable: false, semantic: 关联 canonical_symbol.canonical_id}
+  - {name: exchange,       type: TEXT, nullable: false, semantic: "交易所 sh/sz/bj，与 canonical_id 组成复合身份"}
   - {name: symbol,         type: TEXT, nullable: false, semantic: 带交易所前缀（如 sz000001）}
   - {name: effective_from, type: DATE, nullable: false, semantic: ST 状态开始日期}
   - {name: effective_to,   type: DATE, nullable: true,  semantic: ST 状态结束日期（NULL 表示当前仍为 ST）}
@@ -11,7 +12,7 @@ columns:
   - {name: st_type,        type: TEXT, nullable: true,  semantic: "ST 类型：ST / *ST / S*ST"}
   - {name: observed_at,    type: TIMESTAMPTZ, nullable: false, semantic: 观测时间}
 indexes:
-  - "idx_st_status_pit_canonical ON (canonical_id, effective_from)"
+  - "idx_st_status_pit_canonical ON (exchange, canonical_id, effective_from)"
   - "idx_st_status_pit_symbol ON (symbol, effective_from)"
 pit_semantics: |
   物化视图暴露全部历史区间，下游需自行做 as-of 过滤：

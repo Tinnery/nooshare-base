@@ -1,7 +1,10 @@
 contract: public.corporate_action_event
-version: 2
+version: 3
 description: 公司行为事件溯源表（P2）
 changelog:
+  v3 (2026-11-27):
+    - 复合身份：新增 exchange 列，FK 改 (exchange, canonical_id)
+    - tong 来源 exchange 从 gbbq.symbol 前缀回填；ju 来源从 ju.stocks 回填
   v2 (2026-11-27):
     - 修正 GBBQ category=1 字段映射错误
     - 新增 rights_issue 事件类型
@@ -12,6 +15,7 @@ primary_key: [event_id]
 columns:
   - {name: event_id,       type: TEXT,        nullable: false, semantic: 事件唯一标识（UUID）}
   - {name: canonical_id,   type: TEXT,        nullable: false, semantic: 关联 canonical_symbol.canonical_id}
+  - {name: exchange,       type: TEXT,        nullable: false, semantic: "交易所 sh/sz/bj，与 canonical_id 组成复合身份"}
   - {name: event_type,     type: TEXT,        nullable: false, semantic: '事件类型：st_mark / st_remove / dividend / split / rights_issue / shares_change'}
   - {name: effective_date, type: DATE,        nullable: false, semantic: 生效日期（除权除息日、ST 变更日等）}
   - {name: pub_date,       type: DATE,        nullable: true,  semantic: 公告日期（当前源数据缺失，全部为 NULL）}
@@ -21,8 +25,8 @@ columns:
   - {name: created_at,     type: TIMESTAMPTZ, nullable: false, semantic: 创建时间（DEFAULT now()）}
 constraints:
   - PRIMARY KEY (event_id)
-  - FOREIGN KEY (canonical_id) REFERENCES canonical_symbol(canonical_id)
-  - UNIQUE (canonical_id, event_type, effective_date, source_id)
+  - FOREIGN KEY (exchange, canonical_id) REFERENCES canonical_symbol(exchange, canonical_id)
+  - UNIQUE (exchange, canonical_id, event_type, effective_date, source_id)
 indexes:
   - idx_corporate_action_event_canonical ON (canonical_id, effective_date)
 payload_schema:
