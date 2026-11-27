@@ -61,6 +61,9 @@ def compute_input_hash() -> str:
         # P3: 估值/复权/行情
         ("ju", "valuation", "start_date", ["stock_code", "start_date"]),
         ("tong", "stock_daily", "date", ["symbol", "date"]),
+        # P1(OHLCV): 统一行情三源，index/etf 变化也要触发下游失效重算
+        ("tong", "index_daily", "date", ["symbol", "date"]),
+        ("tong", "etf_daily", "date", ["symbol", "date"]),
         # P3: 财务报表（PIT 视图依赖）
         ("finance", "income_statement", "report_date", ["code", "report_date"]),
         ("finance", "balance_sheet", "report_date", ["code", "report_date"]),
@@ -134,7 +137,8 @@ def compute_output_hash(products: Dict[str, int]) -> str:
     # 关键产物表 (table, pk_cols, sample_threshold)
     # sample_threshold: 行数超过此值则采样，否则全量
     output_tables = [
-        ("public.canonical_symbol", ["canonical_id"], 10000),
+        # 身份方案A 复合 PK = (exchange, canonical_id)，单列 hash 无法反映复合身份变化
+        ("public.canonical_symbol", ["exchange", "canonical_id"], 10000),
         ("public.corporate_action_event", ["event_id"], 50000),
         ("public.hfq_daily", ["symbol", "date"], 1000000),
     ]

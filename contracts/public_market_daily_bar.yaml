@@ -1,5 +1,5 @@
 contract: public.market_daily_bar
-version: 1
+version: 1.1
 description: 统一 Raw 行情消费接口。基于 tong.stock_daily/index_daily/etf_daily 的 UNION ALL View，保留来源与分类，不复制物理数据，不含任何复权价格。
 type: view
 grain: [symbol, date, source_id]
@@ -10,12 +10,12 @@ columns:
   - {name: asset_class,          type: TEXT,        nullable: false, semantic: 标准化分类 stock/bstock/index/block/etf，无法确认时 unknown}
   - {name: source_asset_class,   type: TEXT,        nullable: true,  semantic: tong.symbol_meta 原始分类，忠实透传}
   - {name: source_id,            type: TEXT,        nullable: false, semantic: 行情来源（tdx），不同来源不融合}
-  - {name: open,                 type: NUMERIC(12,2), nullable: false, semantic: Raw 开盘价，源精度透传}
-  - {name: high,                 type: NUMERIC(12,2), nullable: false, semantic: Raw 最高价}
-  - {name: low,                  type: NUMERIC(12,2), nullable: false, semantic: Raw 最低价}
-  - {name: close,                type: NUMERIC(12,2), nullable: false, semantic: Raw 收盘价}
-  - {name: volume,               type: NUMERIC(20,2), nullable: false, semantic: 原始成交量，不乘复权因子；实测无小数无负值}
-  - {name: amount,               type: NUMERIC(20,2), nullable: false, semantic: 原始成交额}
+  - {name: open,                 type: NUMERIC(12,2), nullable: false, unit: source-native price, semantic: Raw 开盘价，源精度透传}
+  - {name: high,                 type: NUMERIC(12,2), nullable: false, unit: source-native price, semantic: Raw 最高价}
+  - {name: low,                  type: NUMERIC(12,2), nullable: false, unit: source-native price, semantic: Raw 最低价}
+  - {name: close,                type: NUMERIC(12,2), nullable: false, unit: source-native price, semantic: Raw 收盘价}
+  - {name: volume,               type: NUMERIC(20,2), nullable: false, unit: source-native, semantic: 原始成交量，不乘复权因子；实测无小数无负值；单位随 source_asset_class 变化，见 units}
+  - {name: amount,               type: NUMERIC(20,2), nullable: false, unit: source-native monetary, semantic: 原始成交额；与 volume 配对口径随资产类变化，见 units}
   - {name: source_observed_at,   type: TIMESTAMPTZ, nullable: true,  semantic: tong.ingested_at，反映导入时点，非上游发布时点}
   - {name: source_relation,      type: TEXT,        nullable: false, semantic: 来源表 tong.stock_daily/index_daily/etf_daily}
   - {name: classification_status,type: TEXT,        nullable: false, semantic: confirmed/unknown，分类是否有 symbol_meta 依据}
@@ -24,6 +24,14 @@ source_tables:
   - tong.index_daily
   - tong.etf_daily
   - tong.symbol_meta
+units:
+  principle: volume/amount/price 忠实透传 TDX .day，不做单位归一化；跨 asset_class 的比值口径不一致，禁止跨类直接加总/排序/zscore/VWAP
+  tdx_source: parse.go:44-48 —— 价格=Uint32(buf)/100；Volume=Uint32(buf[24:28]) 无缩放；Amount=Float32frombits(buf[20:24])；仓库无单位文档，以下判断来自实测反推而非源码定义
+  stock: amount/volume/close≈1.0004（DEV 2026-11-28，15,110,319/15,227,361 行落在 0.95–1.05）→ volume≈股、amount≈元、close≈每股价，VWAP 口径自洽
+  etf: amount/volume/close≈0.11（2,714,574/2,727,031 行落在 0.095–0.105）→ 与 stock 存在稳定约 10 倍口径差；close 可能为放大口径。真实单位待上游确认，禁止与 stock 混算
+  bstock: ratio 双峰（0.535 均值，206,843 行≈1 / 220,066 行≈0.1），计价币种或单位可能混合，待确认
+  index: ratio 无稳定价格关系（5.65 均值，范围 0.0018–1561）；指数无每股价格语义，禁止计算 VWAP 或 close 比值类因子
+  block: ratio 极度分散（147 均值，范围 0.0001–780149），禁止任何量价比值因子
 semantics:
   - UNION ALL 不去重，不合并不同 source
   - 不含 open_hfq/close_hfq/factor_cum 等任何派生列
@@ -35,3 +43,6 @@ validation:
   - Raw 一致：与 tong.stock_daily 逐值比对 mismatch=0
   - 分类：100% confirmed（DEV 2026-11-27）
   - 性能：5000股×5年 A/B，B/A=0.94；单股历史 12.75ms
+  - 五年压测（DEV 2026-11-28）：五年全市场 equity 截面聚合 601万行 290ms；全市场5年按symbol聚合(100股) 401ms；单股5年1175行走索引；8路并发单股查询 22ms
+  - 物化决策：EXPLAIN 确认 symbol/date 谓词下推三源表索引(Parallel Append+Nested Loop Left Join)，VIEW 性能满足典型查询，暂不物化；若未来并发/扫描模式变化需重测
+  - 单位口径：stock amount/volume/close≈1.000；etf≈0.10；index/block 无稳定关系（DEV 2026-11-28 实测，见 units）
