@@ -1,0 +1,37 @@
+contract: public.market_daily_bar
+version: 1
+description: 统一 Raw 行情消费接口。基于 tong.stock_daily/index_daily/etf_daily 的 UNION ALL View，保留来源与分类，不复制物理数据，不含任何复权价格。
+type: view
+grain: [symbol, date, source_id]
+columns:
+  - {name: symbol,               type: TEXT,        nullable: false, semantic: 带交易所前缀完整身份（sh600519）}
+  - {name: date,                 type: INTEGER,     nullable: false, semantic: 交易日 YYYYMMDD}
+  - {name: asset_family,         type: TEXT,        nullable: false, semantic: 下游标准大类 equity/index/fund}
+  - {name: asset_class,          type: TEXT,        nullable: false, semantic: 标准化分类 stock/bstock/index/block/etf，无法确认时 unknown}
+  - {name: source_asset_class,   type: TEXT,        nullable: true,  semantic: tong.symbol_meta 原始分类，忠实透传}
+  - {name: source_id,            type: TEXT,        nullable: false, semantic: 行情来源（tdx），不同来源不融合}
+  - {name: open,                 type: NUMERIC(12,2), nullable: false, semantic: Raw 开盘价，源精度透传}
+  - {name: high,                 type: NUMERIC(12,2), nullable: false, semantic: Raw 最高价}
+  - {name: low,                  type: NUMERIC(12,2), nullable: false, semantic: Raw 最低价}
+  - {name: close,                type: NUMERIC(12,2), nullable: false, semantic: Raw 收盘价}
+  - {name: volume,               type: NUMERIC(20,2), nullable: false, semantic: 原始成交量，不乘复权因子；实测无小数无负值}
+  - {name: amount,               type: NUMERIC(20,2), nullable: false, semantic: 原始成交额}
+  - {name: source_observed_at,   type: TIMESTAMPTZ, nullable: true,  semantic: tong.ingested_at，反映导入时点，非上游发布时点}
+  - {name: source_relation,      type: TEXT,        nullable: false, semantic: 来源表 tong.stock_daily/index_daily/etf_daily}
+  - {name: classification_status,type: TEXT,        nullable: false, semantic: confirmed/unknown，分类是否有 symbol_meta 依据}
+source_tables:
+  - tong.stock_daily
+  - tong.index_daily
+  - tong.etf_daily
+  - tong.symbol_meta
+semantics:
+  - UNION ALL 不去重，不合并不同 source
+  - 不含 open_hfq/close_hfq/factor_cum 等任何派生列
+  - 不生成不存在的交易记录；缺失行情不标记为停牌
+  - 分类以 tong.symbol_meta(symbol,source) 为依据，不按代码前缀猜测
+validation:
+  - 覆盖率：24,757,678 行 = 三源表行数之和
+  - 键唯一：(symbol,date,source_id) 无重复
+  - Raw 一致：与 tong.stock_daily 逐值比对 mismatch=0
+  - 分类：100% confirmed（DEV 2026-11-27）
+  - 性能：5000股×5年 A/B，B/A=0.94；单股历史 12.75ms
