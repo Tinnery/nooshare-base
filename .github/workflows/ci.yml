@@ -26,10 +26,9 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      # 不设置任何 PG_* 环境变量：conftest 会跳过集成测试，
-      # 只执行纯函数单元测试（tests/test_unit.py）。
+      # 不设置任何 PG_* 环境变量：只执行纯函数单元测试。
       - name: Run unit tests
-        run: uv run pytest -v
+        run: uv run pytest -v tests/test_unit.py
 
   integration-pipeline:
     name: Integration pipeline (synthetic data)
@@ -75,9 +74,6 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Run tests (unit; integration marked tests when present)
-        run: uv run pytest -v
-
       - name: Load synthetic CI fixture (ju/tong/finance, no real data)
         run: uv run python scripts/ci_fixture.py
 
@@ -102,6 +98,11 @@ jobs:
       # P0.5: 后复权计算（含 volume/amount）
       - name: Run HFQ calculation
         run: uv run base hfq
+
+      # 集成测试依赖 fixture + schema + PIT 迁移 + 两次 build + hfq 产物。
+      # 必须在这些步骤之后执行，不能在数据库初始化前收集运行。
+      - name: Run tests (unit + integration)
+        run: uv run pytest -v
 
       - name: Run validation suite (V9-V12)
         run: uv run base validate
