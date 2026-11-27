@@ -217,7 +217,8 @@ def init_schema():
     JOIN public.canonical_symbol c ON c.code = v.stock_code
     ORDER BY c.canonical_id, v.start_date;
 
-    -- 复权因子物化视图：从 dividend/split 事件构建
+    -- 复权因子物化视图：从 dividend/split/rights_issue 事件构建
+    -- Phase A 修复：category=1 的配股分量（c4）拆为 rights_issue，必须纳入投影
     CREATE MATERIALIZED VIEW IF NOT EXISTS public.adjustment_factor_pit AS
     SELECT
         e.canonical_id,
@@ -228,7 +229,7 @@ def init_schema():
         e.observed_at
     FROM public.corporate_action_event e
     JOIN public.canonical_symbol c ON c.canonical_id = e.canonical_id
-    WHERE e.event_type IN ('dividend', 'split')
+    WHERE e.event_type IN ('dividend', 'split', 'rights_issue')
     ORDER BY e.canonical_id, e.effective_date;
 
     -- 财务报表 PIT 视图：利润表
