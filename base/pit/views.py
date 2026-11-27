@@ -6,6 +6,10 @@ PIT 视图已在 migration 002 中定义（income_statement_pit / st_status_pit 
 本模块提供 Python 侧的查询封装，确保下游消费者正确使用 PIT 语义。
 
 核心铁律：T 日分析只能看到 pub_date ≤ T 的数据 —— 零前视偏差。
+
+修复记录：
+  2026-11-27: Phase A - query_adjustment_factors() 扩投影到 rights_issue。
+              增加 PIT_UNPROVEN 标注（observed_at 为批量导入时刻，不构成历史 PIT 证明）。
 """
 import logging
 from typing import Optional, Union
@@ -113,19 +117,25 @@ def query_adjustment_factors(
 ) -> pd.DataFrame:
     """查询复权因子（point-in-time）。
 
-    复权因子由 corporate_action_event 中的 dividend/split 事件投影而来。
+    复权因子由 corporate_action_event 中的 dividend/split/rights_issue 事件投影而来。
     只使用 ≤ as_of 的事件计算 —— 零前视偏差。
+
+    PIT_UNPROVEN 标注：
+      当前 corporate_action_event 的 pub_date 全部为 NULL，observed_at 为批量导入时刻。
+      effective_date <= as_of 不足以证明历史 as-of 时点能够获得该事件数据。
+      严格历史 PIT 无法证明，下游使用时应标记为 PIT_UNPROVEN。
 
     Args:
         canonical_id: 证券代码（可选）
         as_of: 查询日期（可选）
 
     Returns:
-        DataFrame: canonical_id, effective_date, event_type, adj_factor_cumulative
+        DataFrame: canonical_id, effective_date, event_type, payload
     """
     as_of_str = _normalize_date(as_of)
 
-    conditions = ["event_type IN ('dividend', 'split')"]
+    # Phase A 修复：扩投影到 rights_issue
+    conditions = ["event_type IN ('dividend', 'split', 'rights_issue')"]
     params = []
 
     if canonical_id:
@@ -152,8 +162,9 @@ def query_adjustment_factors(
         return pd.DataFrame()
 
     # 计算累计复权因子
-    # dividend: per_10shares → 除息日股价调整为 (1 - per_10shares/10/price)
-    # split: ratio → 除权日股价调整为 1/ratio
+    # dividend: cash_per_10 → 除息日股价调整为 (1 - cash_per_10/10/price)
+    # split: convert_per_10 → 除权日股价调整为 1/(1 + convert_per_10/10)
+    # rights_issue: rights_shares_per_10 + rights_price → 配股除权
     # 此处简化处理：返回事件列表，由下游根据 payload 计算具体复权因子
     log.info(f"返回 {len(events)} 条复权事件")
     return events

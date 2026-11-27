@@ -9,6 +9,12 @@
   - market_cap_change: 来自 ju.valuation（区间快照 → 端点事件，可选）
 
 幂等性：UNIQUE (canonical_id, event_type, effective_date, source_id) 承载去重。
+
+修复记录：
+  2026-11-27: Phase A - 修正 GBBQ category=1 字段映射错误。
+              正确语义：c1=每10股现金分红 / c2=配股价 / c3=每10股送转 / c4=每10股配股数。
+              同日混合事件拆为多条（兼容 UNIQUE 键）。
+              删除死常量 GBBQ_CATEGORY_MAP。
 """
 import logging
 from typing import List, Dict, Any, Optional
@@ -20,20 +26,8 @@ from base.db import read_sql, copy_upsert
 log = logging.getLogger(__name__)
 
 
-# tong.gbbq category 映射到事件类型
-# category 含义（tong 仓库约定）：
-#   1 = 除权除息（dividend + split 混合，需按 ratio/per_10shares 区分）
-#   2 = 配股（rights_issue）
-#   3 = 增发（shares_change）
-#   4 = 股本变更（shares_change）
-#   5 = 其他（shares_change）
-GBBQ_CATEGORY_MAP = {
-    1: None,  # 需进一步判断：有 per_10shares → dividend；有 ratio → split；两者都有 → both
-    2: "rights_issue",
-    3: "shares_change",
-    4: "shares_change",
-    5: "shares_change",
-}
+# 异常台账（内存中收集，用于日志和后续持久化）
+_anomaly_log = []
 
 
 def extract_st_events() -> pd.DataFrame:
@@ -86,16 +80,27 @@ def extract_st_events() -> pd.DataFrame:
 
 
 def extract_gbbq_events() -> pd.DataFrame:
-    """从 tong.gbbq 提取除权除息/股本变更事件。
+    """从 tong.gbbq 提取除权除息/配股事件。
 
     tong.gbbq 实际列：symbol, stock_code, date(integer YYYYMMDD), category, c1, c2, c3, c4
     
-    category=1（除权除息）：c1=派息(每10股元), c2=配股价格, c3=送转(每10股), c4=配股数量(每10股)
-    category=2（股本变更）：c1=总股本(万股), c2=流通股本(万股)
-    category=5（增发/配股）：c3/c4 是数量
+    字段语义（已通过 hfq.py 全市场标定 99.92% 验证 + tong adjust_calc.go 三方一致）：
+      - c1 = 每10股现金分红（dividend）
+      - c2 = 配股价（rights_price）
+      - c3 = 每10股送转股数（split/bonus，TDX 不区分送/转）
+      - c4 = 每10股配股数量（rights_shares）
     
-    字段语义已通过除权日开盘参考价格检验验证（99.92% 准确率）。
-    date 列是 integer YYYYMMDD 格式，需要转换。
+    category=1（除权除息）分类规则：
+      - c1 > 0 → dividend 事件
+      - c3 > 0 → split 事件
+      - c4 > 0 → rights_issue 事件（需同时有 c2 配股价）
+      - 同日可有多条事件（拆条，兼容 UNIQUE 键）
+      - c2 > 0 且 c4 = 0 → 孤立配价，记 anomaly
+      - 全零 → 不生成事件
+      - 负值 → 记 anomaly，不生成
+    
+    category=2-15（语义未经核验，tong 上游不用于复权）：
+      - 保持归档为 shares_change，payload 原样保留 c1-c4
     """
     log.info("提取 gbbq 事件 from tong.gbbq...")
 
@@ -114,67 +119,93 @@ def extract_gbbq_events() -> pd.DataFrame:
     gbbq["effective_date"] = pd.to_datetime(gbbq["date_str"], format="%Y%m%d", errors="coerce").dt.date
 
     events = []
+    anomaly_count = 0
+    all_zero_count = 0
 
     for _, row in gbbq.iterrows():
         code = row["stock_code"]
         category = row.get("category")
-        c1 = row.get("c1", 0) or 0
-        c2 = row.get("c2", 0) or 0
-        c3 = row.get("c3", 0) or 0
-        c4 = row.get("c4", 0) or 0
+        c1 = float(row.get("c1", 0) or 0)
+        c2 = float(row.get("c2", 0) or 0)
+        c3 = float(row.get("c3", 0) or 0)
+        c4 = float(row.get("c4", 0) or 0)
         eff_date = row["effective_date"]
 
         if eff_date is None:
             continue
 
         if category == 1:
-            # 除权除息：c1=送股, c2=派息, c3=转增, c4=配股
-            has_dividend = c2 > 0  # 派息
-            has_split = c1 > 0 or c3 > 0  # 送股或转增
+            # 除权除息：按正确语义分类
+            # 检测负值异常
+            if c1 < 0 or c2 < 0 or c3 < 0 or c4 < 0:
+                _anomaly_log.append({
+                    "canonical_id": code,
+                    "date": eff_date,
+                    "anomaly_type": "negative_value",
+                    "detail": f"c1={c1}, c2={c2}, c3={c3}, c4={c4}",
+                })
+                anomaly_count += 1
+                continue
 
-            if has_dividend:
+            # 全零
+            if c1 == 0 and c2 == 0 and c3 == 0 and c4 == 0:
+                all_zero_count += 1
+                continue
+
+            # c1 > 0 → dividend
+            if c1 > 0:
                 events.append({
                     "canonical_id": code,
                     "event_type": "dividend",
                     "effective_date": eff_date,
-                    "payload": {"per_10_shares": float(c2)},  # 每10股派息
+                    "payload": {"cash_per_10": c1},
                     "source_id": "tong",
                 })
-            if has_split:
+
+            # c3 > 0 → split
+            if c3 > 0:
                 events.append({
                     "canonical_id": code,
                     "event_type": "split",
                     "effective_date": eff_date,
-                    "payload": {
-                        "bonus_per_10": float(c1),  # 每10股送股
-                        "convert_per_10": float(c3),  # 每10股转增
-                    },
+                    "payload": {"bonus_per_10": 0.0, "convert_per_10": c3},
                     "source_id": "tong",
                 })
-        elif category == 2:
-            # 股本变更
+
+            # c4 > 0 → rights_issue
+            if c4 > 0:
+                events.append({
+                    "canonical_id": code,
+                    "event_type": "rights_issue",
+                    "effective_date": eff_date,
+                    "payload": {"rights_shares_per_10": c4, "rights_price": c2},
+                    "source_id": "tong",
+                })
+
+            # c2 > 0 且 c4 = 0 → 孤立配价
+            if c2 > 0 and c4 == 0:
+                _anomaly_log.append({
+                    "canonical_id": code,
+                    "date": eff_date,
+                    "anomaly_type": "orphan_rights_price",
+                    "detail": f"c2={c2} but c4=0",
+                })
+                anomaly_count += 1
+
+        elif category in (2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15):
+            # category 2-15：语义未经核验，保持归档
             events.append({
                 "canonical_id": code,
                 "event_type": "shares_change",
                 "effective_date": eff_date,
-                "payload": {
-                    "total_shares_10k": float(c1),  # 总股本(万股)
-                    "float_shares_10k": float(c2),  # 流通股本(万股)
-                },
+                "payload": {"c1": c1, "c2": c2, "c3": c3, "c4": c4, "category": int(category)},
                 "source_id": "tong",
             })
-        elif category in (3, 4, 5):
-            # 增发/配股/其他
-            events.append({
-                "canonical_id": code,
-                "event_type": "shares_change",
-                "effective_date": eff_date,
-                "payload": {"c1": float(c1), "c2": float(c2), "c3": float(c3), "c4": float(c4)},
-                "source_id": "tong",
-            })
+        else:
+            log.warning(f"未知 category={category} at {code} {eff_date}")
 
     df = pd.DataFrame(events)
-    log.info(f"gbbq 事件提取完成: {len(df)} 条")
+    log.info(f"gbbq 事件提取完成: {len(df)} 条 (anomaly={anomaly_count}, all_zero={all_zero_count})")
     return df
 
 
@@ -183,7 +214,7 @@ def build_corporate_action_events() -> int:
 
     流程：
       1. extract_st_events() → ST 事件
-      2. extract_gbbq_events() → 除权除息/股本变更事件
+      2. extract_gbbq_events() → 除权除息/配股/股本变更事件
       3. 合并 → 去重 → 过滤不存在的 canonical_id → 写入数据库
 
     Returns:
@@ -218,7 +249,7 @@ def build_corporate_action_events() -> int:
         return 0
 
     # 5. 补充缺失字段
-    all_events["pub_date"] = None  # 历史回填事件无 pub_date
+    all_events["pub_date"] = None  # 历史回填事件无 pub_date（不伪造）
     all_events["observed_at"] = pd.Timestamp.now()
 
     log.info(f"corporate_action_event 构建完成: {len(all_events)} 条")
@@ -234,6 +265,8 @@ def _insert_events_with_jsonb(df: pd.DataFrame) -> None:
 
     COPY 对 JSONB 的引号转义有问题，改用 psycopg2.extras.execute_values 批量 INSERT。
     幂等性由 UNIQUE 约束保障（ON CONFLICT DO NOTHING）。
+    
+    注意：重灌时必须先 DELETE 旧数据（因旧错误数据与正确数据共享幂等键）。
     """
     from base.db import get_connection
     from psycopg2.extras import execute_values

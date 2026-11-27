@@ -2,6 +2,12 @@
 
 职责：tong.symbol_meta ⋈ ju.stocks → public.canonical_symbol。
 映射冲突写入 reconcile 台账，不做字符串推断。
+
+修复记录：
+  2026-11-27: C1 修复 - JOIN 改为 stock_code + exchange 双条件；
+              消除裸 exchange 访问（显式 exchange_ju）；
+              drop_duplicates 改为冲突检测+报错；
+              ju.stocks 来源一律记为 stock（不依赖 tong.class）。
 """
 import logging
 from typing import List, Dict, Any
@@ -17,7 +23,7 @@ def build_canonical_symbol() -> int:
     """构建 public.canonical_symbol 表。
     
     数据源：
-      - ju.stocks: stock_code, company_name, list_date, delist_date, exchange_id
+      - ju.stocks: stock_code, display_name, exchange, start_date, end_date
       - tong.symbol_meta: symbol, class (stock/index/etf/block)
     
     映射规则：
@@ -57,49 +63,54 @@ def build_canonical_symbol() -> int:
     tong_meta['market'] = tong_meta['symbol'].str[:2]
     tong_meta['code'] = tong_meta['symbol'].str[2:]
     
-    # ju.exchange 直接就是 XSHG/XSHE/BSE，无需映射
+    # ju.exchange 直接就是 XSHG/XSHE/BSE
     # tong market → exchange
     market_map = {'sh': 'XSHG', 'sz': 'XSHE', 'bj': 'BSE'}
-    tong_meta['exchange'] = tong_meta['market'].map(market_map)
+    tong_meta['exchange_tong'] = tong_meta['market'].map(market_map)
     
-    # 4. 合并（带 exchange 验证）
+    # 4. 合并（按 stock_code + exchange 双条件，避免 00 开头深股被误标）
+    ju_stocks = ju_stocks.rename(columns={'exchange': 'exchange_ju'})
+    
     merged = ju_stocks.merge(
-        tong_meta[['code', 'class', 'exchange']],
-        left_on='stock_code',
-        right_on='code',
+        tong_meta[['code', 'class', 'exchange_tong']],
+        left_on=['stock_code', 'exchange_ju'],
+        right_on=['code', 'exchange_tong'],
         how='left',
-        suffixes=('_ju', '_tong')
     )
     
-    # 验证 exchange 映射一致性
+    # 检测 exchange 不一致（应极少，因已按 exchange 合并）
     exchange_mismatches = merged[
         (merged['exchange_ju'].notna()) & 
         (merged['exchange_tong'].notna()) & 
         (merged['exchange_ju'] != merged['exchange_tong'])
     ]
     if not exchange_mismatches.empty:
-        log.warning(f"检测到 {len(exchange_mismatches)} 条 exchange 映射冲突")
-        log.warning(f"示例: {exchange_mismatches[['stock_code', 'exchange_ju', 'exchange_tong']].head(5).to_dict('records')}")
+        log.error(f"检测到 {len(exchange_mismatches)} 条 exchange 映射冲突")
+        raise ValueError(f"exchange 映射冲突 {len(exchange_mismatches)} 条，需人工核查")
     
     # 5. 构建 symbol（tong 风格：sh600000）
-    # ju.stocks.exchange 是小写 sz/sh/bj，直接用作前缀
     def infer_symbol(row):
-        exchange = str(row['exchange']).lower()
-        if exchange in ('sh', 'xshg'):
+        exchange = str(row['exchange_ju']).upper()
+        if exchange == 'XSHG':
             prefix = 'sh'
-        elif exchange in ('bj', 'bse'):
+        elif exchange == 'BSE':
             prefix = 'bj'
+        elif exchange == 'XSHE':
+            prefix = 'sz'
         else:
-            prefix = 'sz'  # 默认 sz（含 xshe）
+            log.warning(f"未知 exchange {exchange}，默认 sz")
+            prefix = 'sz'
         return f"{prefix}{row['stock_code']}"
     
     merged['symbol'] = merged.apply(infer_symbol, axis=1)
-    merged['asset_class'] = merged['class'].fillna('stock')
+    
+    # asset_class：ju.stocks 来源全部为 stock（ju 权威优先于 tong.class）
+    merged['asset_class'] = 'stock'
     
     # 6. 构建最终 DataFrame
     result = pd.DataFrame({
         'canonical_id': merged['stock_code'],
-        'exchange': merged['exchange'],
+        'exchange': merged['exchange_ju'],
         'code': merged['stock_code'],
         'symbol': merged['symbol'],
         'asset_class': merged['asset_class'],
@@ -107,8 +118,11 @@ def build_canonical_symbol() -> int:
         'delist_date': pd.to_datetime(merged['end_date'], errors='coerce'),
     })
     
-    # 去重（如果有重复的 stock_code）
-    result = result.drop_duplicates(subset=['canonical_id'], keep='first')
+    # 检测重复（不应存在，因 ju.stocks 的 stock_code 应唯一）
+    duplicates = result[result.duplicated(subset=['canonical_id'], keep=False)]
+    if not duplicates.empty:
+        log.error(f"检测到 {len(duplicates)} 条 canonical_id 重复")
+        raise ValueError(f"canonical_id 重复 {len(duplicates)} 条，需人工核查")
     
     log.info(f"canonical_symbol 构建完成: {len(result)} 行")
     
@@ -141,15 +155,15 @@ def detect_symbol_mismatches() -> List[Dict[str, Any]]:
     tong_meta['code'] = tong_meta['symbol'].str[2:]
     tong_meta['market'] = tong_meta['symbol'].str[:2]
     market_map = {'sh': 'XSHG', 'sz': 'XSHE', 'bj': 'BSE'}
-    tong_meta['exchange'] = tong_meta['market'].map(market_map)
+    tong_meta['exchange_tong'] = tong_meta['market'].map(market_map)
     
-    # 合并比对
+    # 合并比对（按 code + exchange 双条件）
+    ju_stocks = ju_stocks.rename(columns={'exchange': 'exchange_ju'})
     merged = ju_stocks.merge(
-        tong_meta[['code', 'exchange']],
-        left_on='stock_code',
-        right_on='code',
+        tong_meta[['code', 'exchange_tong']],
+        left_on=['stock_code', 'exchange_ju'],
+        right_on=['code', 'exchange_tong'],
         how='inner',
-        suffixes=('_ju', '_tong')
     )
     
     # 找出 exchange 不一致的记录
@@ -159,7 +173,6 @@ def detect_symbol_mismatches() -> List[Dict[str, Any]]:
     for _, row in mismatches.iterrows():
         result.append({
             'code': row['code'],
-            'tong_symbol': f"{row['code']}",  # 需要重新查 tong_meta 获取完整 symbol
             'ju_exchange': row['exchange_ju'],
             'tong_exchange': row['exchange_tong'],
         })

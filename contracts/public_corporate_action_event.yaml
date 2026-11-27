@@ -1,28 +1,39 @@
 contract: public.corporate_action_event
-version: 1
+version: 2
 description: 公司行为事件溯源表（P2）
+changelog:
+  v2 (2026-11-27):
+    - 修正 GBBQ category=1 字段映射错误
+    - 新增 rights_issue 事件类型
+    - payload_schema 与实现对齐（cash_per_10 / convert_per_10 / rights_shares_per_10 / rights_price）
+    - 增加 PIT_UNPROVEN 标注
+  v1 (2026-11-12): 初始版本
 primary_key: [event_id]
 columns:
   - {name: event_id,       type: TEXT,        nullable: false, semantic: 事件唯一标识（UUID）}
   - {name: canonical_id,   type: TEXT,        nullable: false, semantic: 关联 canonical_symbol.canonical_id}
-  - {name: event_type,     type: TEXT,        nullable: false, semantic: "事件类型：st_mark / st_remove / dividend / split / shares_change"}
+  - {name: event_type,     type: TEXT,        nullable: false, semantic: '事件类型：st_mark / st_remove / dividend / split / rights_issue / shares_change'}
   - {name: effective_date, type: DATE,        nullable: false, semantic: 生效日期（除权除息日、ST 变更日等）}
   - {name: pub_date,       type: DATE,        nullable: true,  semantic: 公告日期（当前源数据缺失，全部为 NULL）}
-  - {name: observed_at,    type: TIMESTAMPTZ, nullable: false, semantic: 观测时间（DEFAULT now()）}
+  - {name: observed_at,    type: TIMESTAMPTZ, nullable: false, semantic: 观测时间（批量导入时刻，不构成历史 PIT 证明）}
   - {name: payload,        type: JSONB,       nullable: true,  semantic: 事件详情（JSON，结构因 event_type 而异）}
-  - {name: source_id,      type: TEXT,        nullable: true,  semantic: 来源标识}
+  - {name: source_id,      type: TEXT,        nullable: true,  semantic: 来源标识（tong / ju）}
   - {name: created_at,     type: TIMESTAMPTZ, nullable: false, semantic: 创建时间（DEFAULT now()）}
 constraints:
-  - "PRIMARY KEY (event_id)"
-  - "FOREIGN KEY (canonical_id) REFERENCES canonical_symbol(canonical_id)"
-  - "UNIQUE (canonical_id, event_type, effective_date, source_id) — 幂等键"
+  - PRIMARY KEY (event_id)
+  - FOREIGN KEY (canonical_id) REFERENCES canonical_symbol(canonical_id)
+  - UNIQUE (canonical_id, event_type, effective_date, source_id)
 indexes:
-  - "idx_corporate_action_event_canonical ON (canonical_id, effective_date)"
+  - idx_corporate_action_event_canonical ON (canonical_id, effective_date)
 payload_schema:
-  st_mark:     "{st_type: 'ST' | '*ST' | 'S*ST'}"
-  st_remove:   "{st_type: 'ST' | '*ST' | 'S*ST'}"
-  dividend:    "{per_10shares: float, bonus_ratio: float}"
-  split:       "{ratio: float}"
-  shares_change: "{total_shares: int, circulating_shares: int}"
+  st_mark:       "{st_type: ST | *ST | S*ST}"
+  st_remove:     "{previous_st_type: ST | *ST | S*ST}"
+  dividend:      "{cash_per_10: float}  # 每10股现金分红"
+  split:         "{bonus_per_10: float, convert_per_10: float}  # 每10股送股/转增"
+  rights_issue:  "{rights_shares_per_10: float, rights_price: float}  # 每10股配股数 + 配股价"
+  shares_change: "{c1: float, c2: float, c3: float, c4: float, category: int}  # category 2-15 归档"
+pit_semantics:
+  status: PIT_UNPROVEN
+  note: pub_date 全部为 NULL，observed_at 为批量导入时刻。effective_date <= as_of 不足以证明历史 PIT。
 source_tables: [ju.st_period, tong.gbbq]
 consumers: [public.st_status_pit, public.adjustment_factor_pit, downstream indicators module]
