@@ -41,7 +41,7 @@ CREATE SCHEMA IF NOT EXISTS finance;
 -- ju.*（上游真实类型以 TEXT/BOOLEAN 为主）
 CREATE TABLE IF NOT EXISTS ju.stocks (
     stock_code TEXT, display_name TEXT, exchange TEXT,
-    start_date TEXT, end_date TEXT
+    start_date DATE, end_date DATE, refreshed_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE TABLE IF NOT EXISTS ju.trading_day (
     trade_date DATE, is_trading_day BOOLEAN,
@@ -118,9 +118,9 @@ TRUNCATE ju.stocks, ju.indices, ju.funds, ju.trading_day, ju.limit_ratio, ju.pub
          finance.income_statement, finance.balance_sheet, finance.cash_flow,
          finance.cash_flow_statement;
 
-INSERT INTO ju.stocks VALUES
-    ('600000', '浦发银行(合成)', 'sh', '19991110', NULL),
-    ('000001', '平安银行(合成)', 'sz', '19910403', NULL);
+INSERT INTO ju.stocks (stock_code, display_name, exchange, start_date, end_date) VALUES
+    ('600000', '浦发银行(合成)', 'sh', '1999-11-10', NULL),
+    ('000001', '平安银行(合成)', 'sz', '1991-04-03', NULL);
 
 INSERT INTO tong.symbol_meta VALUES
     ('sh600000', 'stock'),
