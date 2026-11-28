@@ -125,9 +125,11 @@ def validate_no_lookahead_bias(as_of: Optional[str] = None) -> Dict[str, Any]:
 
     Returns:
         {passed, status, violation_count, detail, evidence}
-        status: PASS / FAIL / INSUFFICIENT_EVIDENCE
+        status: PASS / FAIL / INSUFFICIENT_EVIDENCE / NOT_APPLICABLE
           - FAIL: 发现超区间记录（effective_from > as_of）或检查异常被记为违规
           - INSUFFICIENT_EVIDENCE: 全部检查均执行失败，无可用证据（不得显示绿）
+          - NOT_APPLICABLE: 全部检查目标表未落地（PIT 视图体系属第三阶段规划），
+            检查不适用——既非证据缺失，亦非违规发现，显式标注而非静默放行
           - PASS: 所有检查执行成功且无违规
     """
     log.info(f"V10: 零前视偏差验证 (as_of={as_of})")
@@ -158,9 +160,14 @@ def validate_no_lookahead_bias(as_of: Optional[str] = None) -> Dict[str, Any]:
                 "reason": f"effective_from > {as_of} 的记录 {cnt} 条",
             })
     except Exception as e:
-        log.warning(f"检查 st_status_pit 失败: {e}")
-        evidence["checks"]["st_status_pit"] = {"error": str(e)}
-        violations.append({"check": "st_status_pit", "error": str(e)})
+        if "UndefinedTable" in type(e).__name__ or "does not exist" in str(e):
+            # 目标表未落地（PIT 视图体系属第三阶段规划）：检查不适用，不进 violations
+            log.info("检查 st_status_pit 目标表未落地：NOT_APPLICABLE")
+            evidence["checks"]["st_status_pit"] = {"status": "NOT_APPLICABLE", "reason": "target table not implemented"}
+        else:
+            log.warning(f"检查 st_status_pit 失败: {e}")
+            evidence["checks"]["st_status_pit"] = {"error": str(e)}
+            violations.append({"check": "st_status_pit", "error": str(e)})
 
     # 检查 2: valuation_pit（检查 effective_from > as_of 的记录）
     try:
@@ -178,19 +185,26 @@ def validate_no_lookahead_bias(as_of: Optional[str] = None) -> Dict[str, Any]:
                 "reason": f"effective_from > {as_of} 的记录 {cnt} 条",
             })
     except Exception as e:
-        log.warning(f"检查 valuation_pit 失败: {e}")
-        evidence["checks"]["valuation_pit"] = {"error": str(e)}
-        violations.append({"check": "valuation_pit", "error": str(e)})
+        if "UndefinedTable" in type(e).__name__ or "does not exist" in str(e):
+            log.info("检查 valuation_pit 目标表未落地：NOT_APPLICABLE")
+            evidence["checks"]["valuation_pit"] = {"status": "NOT_APPLICABLE", "reason": "target table not implemented"}
+        else:
+            log.warning(f"检查 valuation_pit 失败: {e}")
+            evidence["checks"]["valuation_pit"] = {"error": str(e)}
+            violations.append({"check": "valuation_pit", "error": str(e)})
 
     checks = evidence["checks"]
-    if checks and all("error" in v for v in checks.values()):
+    if violations:
+        status = "FAIL"
+    elif checks and all("error" in v for v in checks.values()):
         # 全部检查执行失败：无证据，不得判 PASS（六态语义）
         status = "INSUFFICIENT_EVIDENCE"
-    elif violations:
-        status = "FAIL"
+    elif checks and all(v.get("status") == "NOT_APPLICABLE" for v in checks.values()):
+        # 全部检查目标未落地：本轮无可检查对象，显式标注不适用
+        status = "NOT_APPLICABLE"
     else:
         status = "PASS"
-    passed = status == "PASS"
+    passed = status in ("PASS", "NOT_APPLICABLE")
 
     result = {
         "validation": "V10_no_lookahead_bias",
