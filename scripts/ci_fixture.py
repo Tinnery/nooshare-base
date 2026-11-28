@@ -43,7 +43,14 @@ CREATE TABLE IF NOT EXISTS ju.stocks (
     stock_code TEXT, display_name TEXT, exchange TEXT,
     start_date TEXT, end_date TEXT
 );
-CREATE TABLE IF NOT EXISTS ju.trading_day (trade_date TEXT);
+CREATE TABLE IF NOT EXISTS ju.trading_day (
+    trade_date DATE, is_trading_day BOOLEAN,
+    refreshed_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS ju.limit_ratio (
+    stock_code TEXT, start_date DATE, end_date DATE, limit_ratio NUMERIC,
+    refreshed_at TIMESTAMPTZ DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS ju.pub_date (stock_code TEXT, pub_date TEXT);
 CREATE TABLE IF NOT EXISTS ju.st_period (stock_code TEXT, start_date TEXT, end_date TEXT);
 CREATE TABLE IF NOT EXISTS ju.valuation (
@@ -98,7 +105,7 @@ CREATE TABLE IF NOT EXISTS finance.cash_flow_statement (
 );
 
 -- ========== 合成数据（幂等：TRUNCATE + INSERT） ==========
-TRUNCATE ju.stocks, ju.trading_day, ju.pub_date, ju.st_period, ju.valuation,
+TRUNCATE ju.stocks, ju.trading_day, ju.limit_ratio, ju.pub_date, ju.st_period, ju.valuation,
          tong.symbol_meta, tong.stock_daily, tong.index_daily, tong.etf_daily, tong.gbbq,
          finance.income_statement, finance.balance_sheet, finance.cash_flow,
          finance.cash_flow_statement;
@@ -113,8 +120,14 @@ INSERT INTO tong.symbol_meta VALUES
     ('sh000001', 'index'),
     ('sh510300', 'etf');
 
-INSERT INTO ju.trading_day VALUES
-    ('20240102'), ('20240103'), ('20240104'), ('20240105');
+INSERT INTO ju.trading_day (trade_date, is_trading_day) VALUES
+    ('2024-01-02', true), ('2024-01-03', true),
+    ('2024-01-04', true), ('2024-01-05', true);
+
+-- 一条 10% 涨跌停规则（main_board，2024 全区间生效）
+INSERT INTO ju.limit_ratio (stock_code, start_date, end_date, limit_ratio) VALUES
+    ('600000', '1999-11-10', NULL, 0.10),
+    ('000001', '1991-04-03', NULL, 0.10);
 
 INSERT INTO ju.pub_date VALUES
     ('600000', '20240420'), ('000001', '20240420');
