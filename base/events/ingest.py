@@ -297,6 +297,13 @@ def _insert_events_with_jsonb(df: pd.DataFrame) -> None:
 
     # 准备数据：payload 序列化为 JSON 字符串，生成 event_id
     rows = []
+    # exchange is part of the table identity (UNIQUE with canonical_id) and
+    # NOT NULL; resolve it from canonical_symbol instead of guessing.
+    identity = read_sql(
+        "SELECT exchange, canonical_id FROM public.canonical_symbol"
+    )
+    exchange_by_id = dict(zip(identity["canonical_id"], identity["exchange"]))
+
     for _, row in df.iterrows():
         event_id = str(uuid.uuid4())
         payload = row["payload"]
@@ -304,6 +311,7 @@ def _insert_events_with_jsonb(df: pd.DataFrame) -> None:
         rows.append((
             event_id,
             row["canonical_id"],
+            exchange_by_id.get(row["canonical_id"]),
             row["event_type"],
             row["effective_date"],
             row.get("pub_date"),
@@ -318,12 +326,12 @@ def _insert_events_with_jsonb(df: pd.DataFrame) -> None:
                 cur,
                 """
                 INSERT INTO public.corporate_action_event
-                    (event_id, canonical_id, event_type, effective_date, pub_date, payload, source_id, observed_at)
+                    (event_id, canonical_id, exchange, event_type, effective_date, pub_date, payload, source_id, observed_at)
                 VALUES %s
-                ON CONFLICT (canonical_id, event_type, effective_date, source_id) DO NOTHING
+                ON CONFLICT (exchange, canonical_id, event_type, effective_date, source_id) DO NOTHING
                 """,
                 rows,
-                template="(%s, %s, %s, %s, %s, %s::jsonb, %s, %s)",
+                template="(%s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)",
                 page_size=1000,
             )
         conn.commit()
