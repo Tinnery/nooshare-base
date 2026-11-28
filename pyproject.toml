@@ -2,7 +2,7 @@
 name = "nooshare-base"
 version = "0.1.0"
 description = "Point-in-time correct base data product layer for the nooshare matrix"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "pandas>=2.0",
     "numpy>=1.24",

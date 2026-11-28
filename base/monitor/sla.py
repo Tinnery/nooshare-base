@@ -26,7 +26,7 @@ CLI:
 """
 import json
 import logging
-from datetime import datetime, time, timedelta
+from datetime import datetime, time, timedelta, date
 from typing import Dict, Any, List, Optional
 
 import pandas as pd
