@@ -8,14 +8,7 @@
 3. 每个变化点插入一行，而不是每个交易日都插入
 """
 
-import psycopg2
-
-DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "dbname": "nooshare_dev",
-    "user": "travis",
-}
+from base.db import get_connection
 
 
 def rebuild_limit_rule_pit(conn):
@@ -90,24 +83,22 @@ def rebuild_limit_rule_pit(conn):
 
 
 def main():
-    conn = psycopg2.connect(**DB_CONFIG)
-    try:
-        print("Rebuilding limit_rule_pit...")
-        rebuild_limit_rule_pit(conn)
-        print("✓ Rebuild complete")
-        
-        # 验证结果
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM public.limit_rule_pit")
-            count = cur.fetchone()[0]
-            print(f"✓ Verification: {count} rows in limit_rule_pit")
-            
-    except Exception as e:
-        conn.rollback()
-        print(f"✗ Rebuild failed: {e}")
-        raise
-    finally:
-        conn.close()
+    with get_connection() as conn:
+        try:
+            print("Rebuilding limit_rule_pit...")
+            rebuild_limit_rule_pit(conn)
+            print("✓ Rebuild complete")
+
+            # 验证结果
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM public.limit_rule_pit")
+                count = cur.fetchone()[0]
+                print(f"✓ Verification: {count} rows in limit_rule_pit")
+
+        except Exception as e:
+            conn.rollback()
+            print(f"✗ Rebuild failed: {e}")
+            raise
 
 
 if __name__ == "__main__":
