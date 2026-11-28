@@ -224,10 +224,15 @@ def validate_no_lookahead_bias(as_of: Optional[str] = None) -> Dict[str, Any]:
 def validate_symbol_uniqueness() -> Dict[str, Any]:
     """V12: 标识唯一性验证。
 
+    身份裁决（master.py 2026-11-25）：完整身份 = (exchange, canonical_id)。
+    canonical_id 允许跨资产类别复用（000001 = sz000001 股票 AND sh000001
+    指数）——这是合法的；只有同一 canonical_id 被两个 stock 类资产占用
+    （跨交易所撞号）才是真缺陷。
+
     检查：
-      - canonical_symbol 无重复 canonical_id
+      - canonical_symbol 无重复 canonical_id（限 stock 类；跨类复用合法）
       - canonical_symbol 无重复 (exchange, code)
-      - tong.symbol ↔ ju.stock_code 映射无歧义
+      - 同一 code 映射到多个 exchange 且含两个以上 stock 类（真撞号）
 
     Returns:
         {passed, duplicate_count, detail}
@@ -236,10 +241,11 @@ def validate_symbol_uniqueness() -> Dict[str, Any]:
 
     duplicates = []
 
-    # 检查 1: canonical_id 重复
+    # 检查 1: canonical_id 重复（限 stock 类；股票/指数跨类复用合法）
     dup_canonical = read_sql("""
         SELECT canonical_id, COUNT(*) as cnt
         FROM public.canonical_symbol
+        WHERE asset_class = 'stock'
         GROUP BY canonical_id
         HAVING COUNT(*) > 1
     """)
@@ -264,12 +270,16 @@ def validate_symbol_uniqueness() -> Dict[str, Any]:
             "sample": dup_exchange.head(5).to_dict("records"),
         })
 
-    # 检查 3: 同一 code 映射到多个 exchange
+    # 检查 3: 同一 code 映射到多个 exchange，且 stock 类占用数 > 1
+    #（股票跨交易所撞号是缺陷；stock 与 index/etf 复用同一 code 是合法的）
     multi_exchange = read_sql("""
-        SELECT code, COUNT(DISTINCT exchange) as exchange_count
+        SELECT code,
+               COUNT(DISTINCT exchange) as exchange_count,
+               COUNT(*) FILTER (WHERE asset_class = 'stock') as stock_cnt
         FROM public.canonical_symbol
         GROUP BY code
         HAVING COUNT(DISTINCT exchange) > 1
+           AND COUNT(*) FILTER (WHERE asset_class = 'stock') > 1
     """)
     if not multi_exchange.empty:
         duplicates.append({

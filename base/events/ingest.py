@@ -169,6 +169,7 @@ def extract_gbbq_events() -> pd.DataFrame:
                 _p["cash_per_10"] = c1
                 events.append({
                     "canonical_id": code,
+                    "exchange": str(row["symbol"])[:2],
                     "event_type": "dividend",
                     "effective_date": eff_date,
                     "payload": _p,
@@ -181,6 +182,7 @@ def extract_gbbq_events() -> pd.DataFrame:
                 _p.update({"bonus_per_10": 0.0, "convert_per_10": c3})
                 events.append({
                     "canonical_id": code,
+                    "exchange": str(row["symbol"])[:2],
                     "event_type": "split",
                     "effective_date": eff_date,
                     "payload": _p,
@@ -193,6 +195,7 @@ def extract_gbbq_events() -> pd.DataFrame:
                 _p.update({"rights_shares_per_10": c4, "rights_price": c2})
                 events.append({
                     "canonical_id": code,
+                    "exchange": str(row["symbol"])[:2],
                     "event_type": "rights_issue",
                     "effective_date": eff_date,
                     "payload": _p,
@@ -213,6 +216,7 @@ def extract_gbbq_events() -> pd.DataFrame:
             # category 2-15：语义未经核验，保持归档
             events.append({
                 "canonical_id": code,
+                "exchange": str(row["symbol"])[:2],
                 "event_type": "shares_change",
                 "effective_date": eff_date,
                 "payload": {"c1": c1, "c2": c2, "c3": c3, "c4": c4, "category": int(category)},
@@ -302,16 +306,34 @@ def _insert_events_with_jsonb(df: pd.DataFrame) -> None:
     identity = read_sql(
         "SELECT exchange, canonical_id FROM public.canonical_symbol"
     )
-    exchange_by_id = dict(zip(identity["canonical_id"], identity["exchange"]))
+    # canonical_id can collide across exchanges (000001 = sz stock AND sh
+    # index). Map only globally-unique ids; ambiguous ids must come from the
+    # event source (gbbq symbol prefix) or the write is rejected - a silent
+    # wrong-exchange label corrupts the (exchange, canonical_id) identity.
+    dup_mask = identity["canonical_id"].duplicated(keep=False)
+    exchange_by_id = dict(zip(
+        identity.loc[~dup_mask, "canonical_id"],
+        identity.loc[~dup_mask, "exchange"],
+    ))
+    ambiguous_ids = set(identity.loc[dup_mask, "canonical_id"])
 
     for _, row in df.iterrows():
         event_id = str(uuid.uuid4())
         payload = row["payload"]
         payload_json = json.dumps(payload) if isinstance(payload, dict) else "{}"
+        ex = row.get("exchange")
+        if ex is None or (isinstance(ex, float) and pd.isna(ex)):
+            cid = row["canonical_id"]
+            if cid in ambiguous_ids:
+                raise ValueError(
+                    f"事件身份歧义: canonical_id={cid} 在 canonical_symbol 中跨 "
+                    "exchange 撞号，且事件源未携带 exchange，拒绝静默错标"
+                )
+            ex = exchange_by_id.get(cid)
         rows.append((
             event_id,
             row["canonical_id"],
-            exchange_by_id.get(row["canonical_id"]),
+            ex,
             row["event_type"],
             row["effective_date"],
             row.get("pub_date"),
