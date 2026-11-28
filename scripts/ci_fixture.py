@@ -71,6 +71,20 @@ CREATE TABLE IF NOT EXISTS ju.valuation (
     refreshed_at TIMESTAMPTZ DEFAULT now()
 );
 
+-- 旧 fixture 库可能已存在 TEXT 类型的 ju.valuation：CREATE TABLE IF NOT
+-- EXISTS 只跳过建表，不会改列类型。V10 的
+-- "effective_from > as_of::date" 在 text 列上会 UndefinedFunction，
+-- 因此必须显式把列类型纠正为 DATE / NUMERIC / TIMESTAMPTZ。
+ALTER TABLE ju.valuation
+    ALTER COLUMN start_date TYPE DATE USING start_date::date,
+    ALTER COLUMN end_date   TYPE DATE USING end_date::date,
+    ALTER COLUMN capitalization  TYPE NUMERIC USING capitalization::numeric,
+    ALTER COLUMN circulating_cap TYPE NUMERIC USING circulating_cap::numeric;
+
+-- valuation_pit 是从 ju.valuation 展开的物化视图。若它由旧 TEXT schema
+-- 建出，列类型已被烧进视图，必须重建才能与修正后的基表一致。
+DROP MATERIALIZED VIEW IF EXISTS public.valuation_pit;
+
 -- tong.*（日期为 INTEGER YYYYMMDD，价格 numeric）
 CREATE TABLE IF NOT EXISTS tong.symbol_meta (
     symbol TEXT, class TEXT, source TEXT DEFAULT 'tdx', ingested_at TIMESTAMPTZ DEFAULT now()
