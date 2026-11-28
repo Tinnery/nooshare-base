@@ -61,9 +61,14 @@ CREATE TABLE IF NOT EXISTS ju.limit_ratio (
 );
 CREATE TABLE IF NOT EXISTS ju.pub_date (stock_code TEXT, pub_date TEXT);
 CREATE TABLE IF NOT EXISTS ju.st_period (stock_code TEXT, start_date TEXT, end_date TEXT);
+-- 列类型必须镜像真实 ju.valuation（DEV 实证：date/numeric/timestamptz）：
+-- valuation_pit 物化视图无 cast 直投，fixture 用 TEXT 会让 effective_from
+-- 变 text，V10 的 effective_from > as_of::date 比较直接 UndefinedFunction。
+-- V10 已移除 NOT_APPLICABLE 逃逸舱，类型缺陷会让 validate 如实 FAIL。
 CREATE TABLE IF NOT EXISTS ju.valuation (
-    stock_code TEXT, start_date TEXT, end_date TEXT,
-    capitalization TEXT, circulating_cap TEXT, refreshed_at TEXT
+    stock_code TEXT, start_date DATE, end_date DATE,
+    capitalization NUMERIC, circulating_cap NUMERIC,
+    refreshed_at TIMESTAMPTZ DEFAULT now()
 );
 
 -- tong.*（日期为 INTEGER YYYYMMDD，价格 numeric）
