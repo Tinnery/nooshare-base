@@ -5,15 +5,7 @@ T2.2: 创建 public.trading_calendar 和 public.limit_rule_pit（PIT 表）
 从 ju.trading_day 和 ju.limit_ratio 回填数据。
 """
 
-import psycopg2
-from psycopg2 import sql
-
-DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "dbname": "nooshare_dev",
-    "user": "travis",
-}
+from base.db import get_connection
 
 
 def create_trading_calendar(conn):
@@ -140,18 +132,16 @@ def create_limit_rule_pit(conn):
 
 
 def main():
-    conn = psycopg2.connect(**DB_CONFIG)
-    try:
-        print("Creating PIT tables (T2.2)...")
-        create_trading_calendar(conn)
-        create_limit_rule_pit(conn)
-        print("✓ T2.2 migration complete")
-    except Exception as e:
-        conn.rollback()
-        print(f"✗ Migration failed: {e}")
-        raise
-    finally:
-        conn.close()
+    with get_connection() as conn:
+        try:
+            print("Creating PIT tables (T2.2)...")
+            create_trading_calendar(conn)
+            create_limit_rule_pit(conn)
+            print("✓ T2.2 migration complete")
+        except Exception as e:
+            conn.rollback()
+            print(f"✗ Migration failed: {e}")
+            raise
 
 
 if __name__ == "__main__":

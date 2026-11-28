@@ -26,10 +26,9 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      # 不设置任何 PG_* 环境变量：conftest 会跳过集成测试，
-      # 只执行纯函数单元测试（tests/test_unit.py）。
+      # 不设置任何 PG_* 环境变量：只执行纯函数单元测试。
       - name: Run unit tests
-        run: uv run pytest -v
+        run: uv run pytest -v tests/test_unit.py
 
   integration-pipeline:
     name: Integration pipeline (synthetic data)
@@ -75,14 +74,20 @@ jobs:
       - name: Install dependencies
         run: uv sync
 
-      - name: Run tests (unit; integration marked tests when present)
-        run: uv run pytest -v
-
       - name: Load synthetic CI fixture (ju/tong/finance, no real data)
         run: uv run python scripts/ci_fixture.py
 
       - name: Initialize database schema
         run: uv run base init-db
+
+      # P3/P4: 因子版本表 + Adjusted bar 视图此前只在 pro 手工执行，
+      # 新建 CI 库缺失导致 contract-test 失败（relation does not exist）。
+      # 因子数据灌入（migrate_factor_set_v1）不需要：空表时 contract-test
+      # 按契约跳过（表为空，跳过验证）。
+      - name: Migrate factor set schema and adjusted bar view
+        run: |
+          uv run python -c "from base.db import execute_sql; execute_sql(open('scripts/migrate_factor_set_schema.sql').read())"
+          uv run python -c "from base.db import execute_sql; execute_sql(open('scripts/migrate_adjusted_bar_view.sql').read())"
 
       # P0.3/P0.4: PIT 迁移和涨跌停规则重建（必须在 build 之前）
       - name: Migrate PIT tables (limit_rule_pit)
@@ -102,6 +107,11 @@ jobs:
       # P0.5: 后复权计算（含 volume/amount）
       - name: Run HFQ calculation
         run: uv run base hfq
+
+      # 集成测试依赖 fixture + schema + PIT 迁移 + 两次 build + hfq 产物。
+      # 必须在这些步骤之后执行，不能在数据库初始化前收集运行。
+      - name: Run tests (unit + integration)
+        run: uv run pytest -v
 
       - name: Run validation suite (V9-V12)
         run: uv run base validate

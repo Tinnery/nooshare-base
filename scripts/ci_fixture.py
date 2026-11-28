@@ -41,9 +41,24 @@ CREATE SCHEMA IF NOT EXISTS finance;
 -- ju.*（上游真实类型以 TEXT/BOOLEAN 为主）
 CREATE TABLE IF NOT EXISTS ju.stocks (
     stock_code TEXT, display_name TEXT, exchange TEXT,
-    start_date TEXT, end_date TEXT
+    start_date DATE, end_date DATE, refreshed_at TIMESTAMPTZ DEFAULT now()
 );
-CREATE TABLE IF NOT EXISTS ju.trading_day (trade_date TEXT);
+CREATE TABLE IF NOT EXISTS ju.trading_day (
+    trade_date DATE, is_trading_day BOOLEAN,
+    refreshed_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS ju.indices (
+    index_code TEXT, display_name TEXT, start_date DATE, end_date DATE,
+    refreshed_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS ju.funds (
+    fund_code TEXT, display_name TEXT, type TEXT, start_date DATE,
+    end_date DATE, refreshed_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS ju.limit_ratio (
+    stock_code TEXT, start_date DATE, end_date DATE, limit_ratio NUMERIC,
+    refreshed_at TIMESTAMPTZ DEFAULT now()
+);
 CREATE TABLE IF NOT EXISTS ju.pub_date (stock_code TEXT, pub_date TEXT);
 CREATE TABLE IF NOT EXISTS ju.st_period (stock_code TEXT, start_date TEXT, end_date TEXT);
 CREATE TABLE IF NOT EXISTS ju.valuation (
@@ -98,14 +113,14 @@ CREATE TABLE IF NOT EXISTS finance.cash_flow_statement (
 );
 
 -- ========== 合成数据（幂等：TRUNCATE + INSERT） ==========
-TRUNCATE ju.stocks, ju.trading_day, ju.pub_date, ju.st_period, ju.valuation,
+TRUNCATE ju.stocks, ju.indices, ju.funds, ju.trading_day, ju.limit_ratio, ju.pub_date, ju.st_period, ju.valuation,
          tong.symbol_meta, tong.stock_daily, tong.index_daily, tong.etf_daily, tong.gbbq,
          finance.income_statement, finance.balance_sheet, finance.cash_flow,
          finance.cash_flow_statement;
 
-INSERT INTO ju.stocks VALUES
-    ('600000', '浦发银行(合成)', 'sh', '19991110', NULL),
-    ('000001', '平安银行(合成)', 'sz', '19910403', NULL);
+INSERT INTO ju.stocks (stock_code, display_name, exchange, start_date, end_date) VALUES
+    ('600000', '浦发银行(合成)', 'sh', '1999-11-10', NULL),
+    ('000001', '平安银行(合成)', 'sz', '1991-04-03', NULL);
 
 INSERT INTO tong.symbol_meta VALUES
     ('sh600000', 'stock'),
@@ -113,8 +128,22 @@ INSERT INTO tong.symbol_meta VALUES
     ('sh000001', 'index'),
     ('sh510300', 'etf');
 
-INSERT INTO ju.trading_day VALUES
-    ('20240102'), ('20240103'), ('20240104'), ('20240105');
+INSERT INTO ju.trading_day (trade_date, is_trading_day) VALUES
+    ('2024-01-02', true), ('2024-01-03', true),
+    ('2024-01-04', true), ('2024-01-05', true);
+
+-- 指数与 ETF 身份（与 tong.index_daily / tong.etf_daily 合成 symbol 对齐）
+INSERT INTO ju.indices (index_code, display_name, start_date, end_date) VALUES
+    ('sh000001', '上证指数(合成)', '1990-12-19', NULL);
+
+INSERT INTO ju.funds (fund_code, display_name, type, start_date, end_date) VALUES
+    ('sh510300', '沪深300ETF(合成)', 'etf', '2012-05-28', NULL);
+
+-- 一条 10% 涨跌停规则（main_board，2024 全区间生效）
+-- ju.limit_ratio unit: percent (10 = 10%), rebuild_limit_rule_pit divides by 100
+INSERT INTO ju.limit_ratio (stock_code, start_date, end_date, limit_ratio) VALUES
+    ('600000', '1999-11-10', NULL, 10),
+    ('000001', '1991-04-03', NULL, 10);
 
 INSERT INTO ju.pub_date VALUES
     ('600000', '20240420'), ('000001', '20240420');

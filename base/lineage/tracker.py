@@ -134,10 +134,14 @@ class LineageTracker:
         if not lineage_records:
             return
 
-        df = pd.DataFrame(lineage_records)
-        df["transform_rule"] = df["transform_rule"].apply(
-            lambda x: json.dumps(x) if x else None
-        )
+        def _copy_text_escape(value):
+            """COPY TEXT escape: backslash, tab, newline; None/NaT -> \\N."""
+            if value is None or value is pd.NaT:
+                return "\\N"
+            if isinstance(value, float) and pd.isna(value):
+                return "\\N"
+            s = str(value)
+            return s.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n")
 
         with get_connection() as conn:
             with conn.cursor() as cur:
@@ -148,25 +152,23 @@ class LineageTracker:
                     SELECT * FROM public.data_lineage WHERE FALSE
                 """)
 
-                # COPY 数据
+                # COPY 数据：手动构造 TEXT 转义行。
+                # 不用 df.to_csv：CSV quoting 会把含引号的 json 串包裹并翻倍内部引号，
+                # 而 copy_from 是 TEXT 模式不解析 CSV quoting -> jsonb 解析失败。
                 from io import StringIO
                 buf = StringIO()
-                df.to_csv(
-                    buf,
-                    sep="\t",
-                    header=False,
-                    index=False,
-                    na_rep="\\N",
-                    columns=[
-                        "target_table",
-                        "target_row_id",
-                        "source_table",
-                        "source_row_id",
-                        "source_observed_at",
-                        "transform_type",
-                        "transform_rule",
-                    ],
-                )
+                for rec in lineage_records:
+                    rule = rec.get("transform_rule")
+                    fields = [
+                        rec["target_table"],
+                        rec["target_row_id"],
+                        rec.get("source_table"),
+                        rec.get("source_row_id"),
+                        rec.get("source_observed_at"),
+                        rec.get("transform_type"),
+                        json.dumps(rule) if rule else None,
+                    ]
+                    buf.write("\t".join(_copy_text_escape(f) for f in fields) + "\n")
                 buf.seek(0)
                 cur.copy_from(
                     buf,

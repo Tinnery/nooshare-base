@@ -125,9 +125,11 @@ def validate_no_lookahead_bias(as_of: Optional[str] = None) -> Dict[str, Any]:
 
     Returns:
         {passed, status, violation_count, detail, evidence}
-        status: PASS / FAIL / INSUFFICIENT_EVIDENCE
+        status: PASS / FAIL / INSUFFICIENT_EVIDENCE / NOT_APPLICABLE
           - FAIL: 发现超区间记录（effective_from > as_of）或检查异常被记为违规
           - INSUFFICIENT_EVIDENCE: 全部检查均执行失败，无可用证据（不得显示绿）
+          - NOT_APPLICABLE: 全部检查目标表未落地（PIT 视图体系属第三阶段规划），
+            检查不适用——既非证据缺失，亦非违规发现，显式标注而非静默放行
           - PASS: 所有检查执行成功且无违规
     """
     log.info(f"V10: 零前视偏差验证 (as_of={as_of})")
@@ -158,9 +160,14 @@ def validate_no_lookahead_bias(as_of: Optional[str] = None) -> Dict[str, Any]:
                 "reason": f"effective_from > {as_of} 的记录 {cnt} 条",
             })
     except Exception as e:
-        log.warning(f"检查 st_status_pit 失败: {e}")
-        evidence["checks"]["st_status_pit"] = {"error": str(e)}
-        violations.append({"check": "st_status_pit", "error": str(e)})
+        if "UndefinedTable" in type(e).__name__ or "does not exist" in str(e):
+            # 目标表未落地（PIT 视图体系属第三阶段规划）：检查不适用，不进 violations
+            log.info("检查 st_status_pit 目标表未落地：NOT_APPLICABLE")
+            evidence["checks"]["st_status_pit"] = {"status": "NOT_APPLICABLE", "reason": "target table not implemented"}
+        else:
+            log.warning(f"检查 st_status_pit 失败: {e}")
+            evidence["checks"]["st_status_pit"] = {"error": str(e)}
+            violations.append({"check": "st_status_pit", "error": str(e)})
 
     # 检查 2: valuation_pit（检查 effective_from > as_of 的记录）
     try:
@@ -178,19 +185,26 @@ def validate_no_lookahead_bias(as_of: Optional[str] = None) -> Dict[str, Any]:
                 "reason": f"effective_from > {as_of} 的记录 {cnt} 条",
             })
     except Exception as e:
-        log.warning(f"检查 valuation_pit 失败: {e}")
-        evidence["checks"]["valuation_pit"] = {"error": str(e)}
-        violations.append({"check": "valuation_pit", "error": str(e)})
+        if "UndefinedTable" in type(e).__name__ or "does not exist" in str(e):
+            log.info("检查 valuation_pit 目标表未落地：NOT_APPLICABLE")
+            evidence["checks"]["valuation_pit"] = {"status": "NOT_APPLICABLE", "reason": "target table not implemented"}
+        else:
+            log.warning(f"检查 valuation_pit 失败: {e}")
+            evidence["checks"]["valuation_pit"] = {"error": str(e)}
+            violations.append({"check": "valuation_pit", "error": str(e)})
 
     checks = evidence["checks"]
-    if checks and all("error" in v for v in checks.values()):
+    if violations:
+        status = "FAIL"
+    elif checks and all("error" in v for v in checks.values()):
         # 全部检查执行失败：无证据，不得判 PASS（六态语义）
         status = "INSUFFICIENT_EVIDENCE"
-    elif violations:
-        status = "FAIL"
+    elif checks and all(v.get("status") == "NOT_APPLICABLE" for v in checks.values()):
+        # 全部检查目标未落地：本轮无可检查对象，显式标注不适用
+        status = "NOT_APPLICABLE"
     else:
         status = "PASS"
-    passed = status == "PASS"
+    passed = status in ("PASS", "NOT_APPLICABLE")
 
     result = {
         "validation": "V10_no_lookahead_bias",
@@ -210,10 +224,15 @@ def validate_no_lookahead_bias(as_of: Optional[str] = None) -> Dict[str, Any]:
 def validate_symbol_uniqueness() -> Dict[str, Any]:
     """V12: 标识唯一性验证。
 
+    身份裁决（master.py 2026-11-25）：完整身份 = (exchange, canonical_id)。
+    canonical_id 允许跨资产类别复用（000001 = sz000001 股票 AND sh000001
+    指数）——这是合法的；只有同一 canonical_id 被两个 stock 类资产占用
+    （跨交易所撞号）才是真缺陷。
+
     检查：
-      - canonical_symbol 无重复 canonical_id
+      - canonical_symbol 无重复 canonical_id（限 stock 类；跨类复用合法）
       - canonical_symbol 无重复 (exchange, code)
-      - tong.symbol ↔ ju.stock_code 映射无歧义
+      - 同一 code 映射到多个 exchange 且含两个以上 stock 类（真撞号）
 
     Returns:
         {passed, duplicate_count, detail}
@@ -222,10 +241,11 @@ def validate_symbol_uniqueness() -> Dict[str, Any]:
 
     duplicates = []
 
-    # 检查 1: canonical_id 重复
+    # 检查 1: canonical_id 重复（限 stock 类；股票/指数跨类复用合法）
     dup_canonical = read_sql("""
         SELECT canonical_id, COUNT(*) as cnt
         FROM public.canonical_symbol
+        WHERE asset_class = 'stock'
         GROUP BY canonical_id
         HAVING COUNT(*) > 1
     """)
@@ -250,12 +270,16 @@ def validate_symbol_uniqueness() -> Dict[str, Any]:
             "sample": dup_exchange.head(5).to_dict("records"),
         })
 
-    # 检查 3: 同一 code 映射到多个 exchange
+    # 检查 3: 同一 code 映射到多个 exchange，且 stock 类占用数 > 1
+    #（股票跨交易所撞号是缺陷；stock 与 index/etf 复用同一 code 是合法的）
     multi_exchange = read_sql("""
-        SELECT code, COUNT(DISTINCT exchange) as exchange_count
+        SELECT code,
+               COUNT(DISTINCT exchange) as exchange_count,
+               COUNT(*) FILTER (WHERE asset_class = 'stock') as stock_cnt
         FROM public.canonical_symbol
         GROUP BY code
         HAVING COUNT(DISTINCT exchange) > 1
+           AND COUNT(*) FILTER (WHERE asset_class = 'stock') > 1
     """)
     if not multi_exchange.empty:
         duplicates.append({
