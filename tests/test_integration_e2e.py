@@ -9,7 +9,7 @@ valuation_pit / financial_data_pit）与设想中的 API 编写，但这些表
   - corporate_action_event：st_mark/st_remove 与 dividend（canonical_id 身份）
   - GBBQ 字段语义：payload 保留 c1-c4 原语义 + cash_per_10
   - limit_rule_pit：exchange/security_type/limit_ratio（无 symbol 列）
-  - hfq_daily：含 volume/amount
+  - market_daily_adjusted_bar：含 volume/amount（P7: 替代 hfq_daily）
   - 财务查询：query_financial_data（income_statement_pit）
   - Pipeline 幂等性：pipeline_run status='ok'
   - Freshness/SLA
@@ -217,33 +217,33 @@ class TestLimitRulePIT:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. hfq_daily（P0.5）
+# 5. market_daily_adjusted_bar（P7: 替代 hfq_daily）
 # ─────────────────────────────────────────────────────────────────────────────
 
-class TestHFQDaily:
-    """验证后复权日线含 volume/amount。"""
+class TestMarketDailyAdjustedBar:
+    """验证后复权日线视图含 volume/amount（P7: hfq_daily 已退役）。"""
 
-    def test_hfq_daily_has_volume_amount(self):
-        """hfq_daily 表应该有 volume 和 amount 列。"""
+    def test_adjusted_bar_has_volume_amount(self):
+        """market_daily_adjusted_bar 视图应该有 volume 和 amount 列。"""
         df = read_sql("""
             SELECT column_name
             FROM information_schema.columns
-            WHERE table_schema = 'public' AND table_name = 'hfq_daily'
+            WHERE table_schema = 'public' AND table_name = 'market_daily_bar'
         """)
         columns = set(df["column_name"])
         assert "volume" in columns
         assert "amount" in columns
 
-    def test_hfq_daily_data(self):
-        """hfq_daily 应该有数据。"""
-        df = read_sql("SELECT COUNT(*) AS cnt FROM public.hfq_daily")
+    def test_adjusted_bar_data(self):
+        """market_daily_adjusted_bar 视图应该有数据。"""
+        df = read_sql("SELECT COUNT(*) AS cnt FROM public.market_daily_adjusted_bar")
         assert df.iloc[0]["cnt"] > 0
 
-    def test_hfq_daily_volume_amount_not_null(self):
+    def test_adjusted_bar_volume_amount_not_null(self):
         """volume 和 amount 不应该为 NULL。"""
         df = read_sql("""
             SELECT symbol, date, volume, amount
-            FROM public.hfq_daily
+            FROM public.market_daily_adjusted_bar
             WHERE volume IS NULL OR amount IS NULL
         """)
         assert len(df) == 0
@@ -368,7 +368,7 @@ class TestE2EIntegration:
             "valuation_pit",
             "limit_rule_pit",
             "trading_calendar",
-            "hfq_daily",
+            "market_daily_adjusted_bar",
             "pipeline_run",
             "data_freshness",
         }
