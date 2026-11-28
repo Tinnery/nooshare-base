@@ -48,14 +48,50 @@ def extract_st_events() -> pd.DataFrame:
     if st_periods.empty:
         return pd.DataFrame()
 
+    # ju.st_period is a STOCK source; identity must be resolved inside the
+    # stock asset class only. A colliding index/ETF canonical_id (e.g. sh
+    # 000001) does not make a stock ambiguous — cross-asset reuse is legal.
+    stock_identity = read_sql("""
+        SELECT canonical_id, exchange
+        FROM public.canonical_symbol
+        WHERE asset_class = 'stock'
+    """)
+    dup_stocks = stock_identity[stock_identity["canonical_id"].duplicated(keep=False)]
+    exchange_by_stock = dict(zip(
+        stock_identity.loc[
+            ~stock_identity["canonical_id"].duplicated(keep=False),
+            "canonical_id",
+        ],
+        stock_identity.loc[
+            ~stock_identity["canonical_id"].duplicated(keep=False),
+            "exchange",
+        ],
+    ))
+    ambiguous_stock_ids = set(dup_stocks["canonical_id"])
+
     events = []
+    unresolved: Dict[str, int] = {}
 
     for _, row in st_periods.iterrows():
         code = row["stock_code"]
 
+        # Exchange must come from the stock identity domain; an id that is
+        # not in canonical_symbol stock rows stays unresolved and is
+        # rejected below — never guessed.
+        exchange = exchange_by_stock.get(code)
+        if exchange is None and code in ambiguous_stock_ids:
+            raise ValueError(
+                f"ST 事件身份歧义: canonical_id={code} 在 canonical_symbol "
+                "stock 类内跨 exchange 撞号，拒绝猜测"
+            )
+        if exchange is None:
+            unresolved[code] = unresolved.get(code, 0) + 1
+            continue
+
         # st_mark 事件
         events.append({
             "canonical_id": code,
+            "exchange": exchange,
             "event_type": "st_mark",
             "effective_date": row["start_date"],
             "payload": {"st_type": "ST"},
@@ -68,11 +104,18 @@ def extract_st_events() -> pd.DataFrame:
             remove_date = end_date + pd.Timedelta(days=1)
             events.append({
                 "canonical_id": code,
+                "exchange": exchange,
                 "event_type": "st_remove",
                 "effective_date": remove_date.date(),
                 "payload": {"previous_st_type": "ST"},
                 "source_id": "ju",
             })
+
+    if unresolved:
+        log.warning(
+            "ST 事件跳过无 stock 身份的 code（%d 个）: %s",
+            len(unresolved), sorted(unresolved)[:10],
+        )
 
     df = pd.DataFrame(events)
     log.info(f"ST 事件提取完成: {len(df)} 条")
@@ -254,16 +297,23 @@ def build_corporate_action_events() -> int:
         log.warning("无事件可写入")
         return 0
 
-    # 3. 去重（同一 canonical_id + event_type + effective_date + source_id 只保留一条）
-    all_events = all_events.drop_duplicates(
-        subset=["canonical_id", "event_type", "effective_date", "source_id"],
-        keep="first"
-    )
+    # 3. 去重（复合身份 exchange + canonical_id + event_type + effective_date
+    #    + source_id 只保留一条；跨交易所同号码事件不得互相吞并）
+    dedup_subset = [
+        col for col in
+        ["exchange", "canonical_id", "event_type", "effective_date", "source_id"]
+        if col in all_events.columns
+    ]
+    all_events = all_events.drop_duplicates(subset=dedup_subset, keep="first")
 
-    # 4. 过滤：只保留 canonical_symbol 中存在的 canonical_id
-    valid_ids = read_sql("SELECT canonical_id FROM public.canonical_symbol")
-    valid_ids_set = set(valid_ids["canonical_id"])
-    all_events = all_events[all_events["canonical_id"].isin(valid_ids_set)]
+    # 4. 过滤：只保留 canonical_symbol 中存在 (exchange, canonical_id) 的事件。
+    #    单独 canonical_id 过滤会错误保留错标 exchange 的行。
+    valid_ids = read_sql(
+        "SELECT exchange, canonical_id FROM public.canonical_symbol"
+    )
+    valid_pairs = set(zip(valid_ids["exchange"], valid_ids["canonical_id"]))
+    event_pairs = list(zip(all_events["exchange"], all_events["canonical_id"]))
+    all_events = all_events[pd.Series(event_pairs, index=all_events.index).isin(valid_pairs)]
 
     if all_events.empty:
         log.warning("过滤后无事件可写入（所有事件的 canonical_id 不在 canonical_symbol 中）")
@@ -373,9 +423,9 @@ def detect_event_anomalies() -> List[Dict[str, Any]]:
     log.info("检测事件流异常...")
 
     events = read_sql("""
-        SELECT canonical_id, event_type, effective_date, payload
+        SELECT exchange, canonical_id, event_type, effective_date, payload
         FROM public.corporate_action_event
-        ORDER BY canonical_id, effective_date, event_type
+        ORDER BY exchange, canonical_id, effective_date, event_type
     """)
 
     if events.empty:
@@ -383,8 +433,9 @@ def detect_event_anomalies() -> List[Dict[str, Any]]:
 
     anomalies = []
 
-    # 按 canonical_id 分组检查
-    for canonical_id, group in events.groupby("canonical_id"):
+    # 按复合身份 (exchange, canonical_id) 分组检查——跨所同号码是两个
+    # 不同证券，其事件序列不得混在一起判定时序。
+    for (exchange, canonical_id), group in events.groupby(["exchange", "canonical_id"]):
         group = group.sort_values("effective_date")
 
         # 检查 1: 同一天多个 st_mark
@@ -393,6 +444,7 @@ def detect_event_anomalies() -> List[Dict[str, Any]]:
         dup_dates = dup_dates[dup_dates > 1]
         for date, count in dup_dates.items():
             anomalies.append({
+                "exchange": exchange,
                 "canonical_id": canonical_id,
                 "anomaly_type": "duplicate_st_mark",
                 "date": date,
@@ -406,6 +458,7 @@ def detect_event_anomalies() -> List[Dict[str, Any]]:
             first_remove = st_events[st_events["event_type"] == "st_remove"]["effective_date"].min()
             if pd.notna(first_remove) and pd.notna(first_mark) and first_remove < first_mark:
                 anomalies.append({
+                    "exchange": exchange,
                     "canonical_id": canonical_id,
                     "anomaly_type": "st_remove_before_mark",
                     "date": first_remove,
