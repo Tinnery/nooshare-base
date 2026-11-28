@@ -13,6 +13,7 @@ from typing import Optional, Dict, Any, List
 from datetime import date
 
 import pandas as pd
+from psycopg2.errors import UndefinedTable
 
 from base.db import read_sql
 
@@ -125,12 +126,16 @@ def validate_no_lookahead_bias(as_of: Optional[str] = None) -> Dict[str, Any]:
 
     Returns:
         {passed, status, violation_count, detail, evidence}
-        status: PASS / FAIL / INSUFFICIENT_EVIDENCE / NOT_APPLICABLE
-          - FAIL: 发现超区间记录（effective_from > as_of）或检查异常被记为违规
+        status: PASS / FAIL / INSUFFICIENT_EVIDENCE
+          - FAIL: 发现超区间记录（effective_from > as_of）、检查执行失败或
+            必需检查对象缺失（st_status_pit / valuation_pit 是 init_schema()
+            声明的必需物化视图；缺对象是 schema 缺陷，不是能力边界）
           - INSUFFICIENT_EVIDENCE: 全部检查均执行失败，无可用证据（不得显示绿）
-          - NOT_APPLICABLE: 全部检查目标表未落地（PIT 视图体系属第三阶段规划），
-            检查不适用——既非证据缺失，亦非违规发现，显式标注而非静默放行
           - PASS: 所有检查执行成功且无违规
+
+        NOT_APPLICABLE 已从本检查移除：V10 的两个目标是 init_schema() 的
+        必需产物，不存在"未落地"的合法状态；缺表/缺列/连接错误一律保留
+        真实失败状态（UndefinedTable 42P01 也不再豁免）。
     """
     log.info(f"V10: 零前视偏差验证 (as_of={as_of})")
 
@@ -160,14 +165,23 @@ def validate_no_lookahead_bias(as_of: Optional[str] = None) -> Dict[str, Any]:
                 "reason": f"effective_from > {as_of} 的记录 {cnt} 条",
             })
     except Exception as e:
-        if "UndefinedTable" in type(e).__name__ or "does not exist" in str(e):
-            # 目标表未落地（PIT 视图体系属第三阶段规划）：检查不适用，不进 violations
-            log.info("检查 st_status_pit 目标表未落地：NOT_APPLICABLE")
-            evidence["checks"]["st_status_pit"] = {"status": "NOT_APPLICABLE", "reason": "target table not implemented"}
-        else:
-            log.warning(f"检查 st_status_pit 失败: {e}")
-            evidence["checks"]["st_status_pit"] = {"error": str(e)}
-            violations.append({"check": "st_status_pit", "error": str(e)})
+        # Precise exception typing instead of substring matching: only a
+        # missing RELATION (UndefinedTable, SQLSTATE 42P01) proves the object
+        # itself is absent. UndefinedColumn (42703) and every other failure
+        # keep their real state — a missing column or a broken query is a
+        # schema defect, never a NOT_APPLICABLE, because both materialized
+        # views are declared required by init_schema(). Missing required
+        # objects FAIL instead of auto-passing.
+        log.warning(f"检查 st_status_pit 失败: {type(e).__name__}: {e}")
+        evidence["checks"]["st_status_pit"] = {
+            "error": str(e),
+            "sqlstate_missing_relation": isinstance(e, UndefinedTable),
+        }
+        violations.append({
+            "check": "st_status_pit",
+            "error": str(e),
+            "sqlstate_missing_relation": isinstance(e, UndefinedTable),
+        })
 
     # 检查 2: valuation_pit（检查 effective_from > as_of 的记录）
     try:
@@ -185,33 +199,41 @@ def validate_no_lookahead_bias(as_of: Optional[str] = None) -> Dict[str, Any]:
                 "reason": f"effective_from > {as_of} 的记录 {cnt} 条",
             })
     except Exception as e:
-        if "UndefinedTable" in type(e).__name__ or "does not exist" in str(e):
-            log.info("检查 valuation_pit 目标表未落地：NOT_APPLICABLE")
-            evidence["checks"]["valuation_pit"] = {"status": "NOT_APPLICABLE", "reason": "target table not implemented"}
-        else:
-            log.warning(f"检查 valuation_pit 失败: {e}")
-            evidence["checks"]["valuation_pit"] = {"error": str(e)}
-            violations.append({"check": "valuation_pit", "error": str(e)})
+        # Same contract as check 1: UndefinedColumn and any other SQL failure
+        # keep the real error state; missing required relations FAIL.
+        log.warning(f"检查 valuation_pit 失败: {type(e).__name__}: {e}")
+        evidence["checks"]["valuation_pit"] = {
+            "error": str(e),
+            "sqlstate_missing_relation": isinstance(e, UndefinedTable),
+        }
+        violations.append({
+            "check": "valuation_pit",
+            "error": str(e),
+            "sqlstate_missing_relation": isinstance(e, UndefinedTable),
+        })
 
     checks = evidence["checks"]
     if violations:
+        # Real look-ahead violations AND failed/missing checks are both FAIL:
+        # a check that cannot run proves nothing, and required objects that
+        # are absent mean the schema is broken — neither may show green.
         status = "FAIL"
     elif checks and all("error" in v for v in checks.values()):
         # 全部检查执行失败：无证据，不得判 PASS（六态语义）
         status = "INSUFFICIENT_EVIDENCE"
-    elif checks and all(v.get("status") == "NOT_APPLICABLE" for v in checks.values()):
-        # 全部检查目标未落地：本轮无可检查对象，显式标注不适用
-        status = "NOT_APPLICABLE"
     else:
         status = "PASS"
-    passed = status in ("PASS", "NOT_APPLICABLE")
+    passed = status == "PASS"
 
     result = {
         "validation": "V10_no_lookahead_bias",
         "passed": passed,
         "status": status,
         "as_of": as_of,
-        "violation_count": sum(v.get("violation_count", 0) for v in violations),
+        "violation_count": sum(
+            v.get("violation_count", 0) + (1 if "error" in v else 0)
+            for v in violations
+        ),
         "threshold": 0,
         "detail": violations if violations else "全部通过",
         "evidence": evidence,
