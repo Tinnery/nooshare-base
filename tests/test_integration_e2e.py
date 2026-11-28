@@ -90,11 +90,16 @@ class TestCorporateActionEvent:
         assert set(df["event_type"]) == {"st_mark", "st_remove"}
 
     def test_st_events_belong_to_sh600000(self):
-        """ST 事件应关联 sh600000（经 canonical_id JOIN）。"""
+        """ST 事件应关联 sh600000（经 canonical_id + exchange JOIN）。
+
+        注意必须带 exchange：'000001' 在 canonical_symbol 中同时是
+        sz000001（stock）与 sh000001（index），不带 exchange 会一对多。
+        """
         df = read_sql("""
             SELECT cs.symbol, ca.event_type
             FROM public.corporate_action_event ca
-            JOIN public.canonical_symbol cs ON ca.canonical_id = cs.canonical_id
+            JOIN public.canonical_symbol cs
+              ON ca.canonical_id = cs.canonical_id AND ca.exchange = cs.exchange
             WHERE ca.event_type IN ('st_mark', 'st_remove')
         """)
         assert len(df) == 2
@@ -116,7 +121,8 @@ class TestCorporateActionEvent:
         df = read_sql("""
             SELECT cs.symbol, ca.effective_date, ca.payload
             FROM public.corporate_action_event ca
-            JOIN public.canonical_symbol cs ON ca.canonical_id = cs.canonical_id
+            JOIN public.canonical_symbol cs
+              ON ca.canonical_id = cs.canonical_id AND ca.exchange = cs.exchange
             WHERE ca.event_type = 'dividend'
             ORDER BY cs.symbol
         """)

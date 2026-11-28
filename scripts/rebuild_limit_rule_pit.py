@@ -30,6 +30,8 @@ def rebuild_limit_rule_pit(conn):
                         WHEN LEFT(stock_code, 3) IN ('300', '301') THEN 'chi_next'
                         WHEN LEFT(stock_code, 1) = '6' THEN 'main_board'
                         WHEN LEFT(stock_code, 1) = '0' THEN 'main_board'
+                        WHEN LEFT(stock_code, 1) = '6' AND LEFT(stock_code, 3) = '688' THEN 'star_market'
+                        WHEN LEFT(stock_code, 1) = '6' THEN 'main_board'
                         WHEN LEFT(stock_code, 1) IN ('8', '4') THEN 'bse'
                         ELSE 'unknown'
                     END AS security_type,

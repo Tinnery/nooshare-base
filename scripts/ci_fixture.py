@@ -140,9 +140,10 @@ INSERT INTO ju.funds (fund_code, display_name, type, start_date, end_date) VALUE
     ('sh510300', '沪深300ETF(合成)', 'etf', '2012-05-28', NULL);
 
 -- 一条 10% 涨跌停规则（main_board，2024 全区间生效）
+-- ju.limit_ratio unit: percent (10 = 10%), rebuild_limit_rule_pit divides by 100
 INSERT INTO ju.limit_ratio (stock_code, start_date, end_date, limit_ratio) VALUES
-    ('600000', '1999-11-10', NULL, 0.10),
-    ('000001', '1991-04-03', NULL, 0.10);
+    ('600000', '1999-11-10', NULL, 10),
+    ('000001', '1991-04-03', NULL, 10);
 
 INSERT INTO ju.pub_date VALUES
     ('600000', '20240420'), ('000001', '20240420');
