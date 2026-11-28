@@ -218,7 +218,7 @@ def test_cross_implementation_consistency():
     tong 公式：P_ex = (P_pre*10 - d + r*pr) / (10 + s + r)
     其中 d=c1, r=c4, pr=c2, s=c3
     """
-    from base.adjust.hfq import _event_factors
+    from base.adjust.factor_builder import _event_factors
     from base.events.ingest import extract_gbbq_events
     import base.events.ingest as ingest_mod
 
@@ -272,7 +272,7 @@ class TestEventFactors:
     EV_COLS = ["ex_date", "c1", "c2", "c3", "c4"]
 
     def test_dividend_only(self):
-        from base.adjust.hfq import _event_factors
+        from base.adjust.factor_builder import _event_factors
 
         ev = pd.DataFrame([dict(zip(self.EV_COLS, [20240104, 2.0, 0.0, 0.0, 0.0]))])
         px = _px_frame([
@@ -287,7 +287,7 @@ class TestEventFactors:
         assert res.iloc[0]["ex_date"] == 20240104
 
     def test_bonus_shares(self):
-        from base.adjust.hfq import _event_factors
+        from base.adjust.factor_builder import _event_factors
 
         ev = pd.DataFrame([dict(zip(self.EV_COLS, [20240105, 1.2, 0.0, 5.0, 0.0]))])
         px = _px_frame([
@@ -300,7 +300,7 @@ class TestEventFactors:
         assert math.isclose(res.iloc[0]["factor"], expected, rel_tol=1e-12)
 
     def test_rights_issue(self):
-        from base.adjust.hfq import _event_factors
+        from base.adjust.factor_builder import _event_factors
 
         ev = pd.DataFrame([dict(zip(self.EV_COLS, [20240104, 0.0, 8.0, 0.0, 3.0]))])
         px = _px_frame([
@@ -314,7 +314,7 @@ class TestEventFactors:
         assert math.isclose(res.iloc[0]["factor"], expected, rel_tol=1e-12)
 
     def test_zero_event_skipped(self):
-        from base.adjust.hfq import _event_factors
+        from base.adjust.factor_builder import _event_factors
 
         ev = pd.DataFrame([dict(zip(self.EV_COLS, [20240104, 0.0, 0.0, 0.0, 0.0]))])
         px = _px_frame([("sh600000", 20240103, 10.30)])
@@ -323,7 +323,7 @@ class TestEventFactors:
 
     def test_event_before_first_price_skipped(self):
         """事件早于全部价格：无 P_pre 基准 → 因子按 1 跳过并计数。"""
-        from base.adjust.hfq import _event_factors
+        from base.adjust.factor_builder import _event_factors
 
         ev = pd.DataFrame([dict(zip(self.EV_COLS, [20200101, 2.0, 0.0, 0.0, 0.0]))])
         px = _px_frame([("sh600000", 20240102, 10.10)])

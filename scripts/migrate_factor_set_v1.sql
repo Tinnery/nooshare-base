@@ -1,3 +1,15 @@
+-- ═══════════════════════════════════════════════════════════════════
+-- [ONE-OFF HISTORICAL MIGRATION — 禁止纳入自动 migration runner]
+--
+-- 本脚本把已退役的 public.hfq_daily.factor_cum 一次性导入为 Factor Set v1。
+-- 它依赖旧表，故在旧表 DROP 之后无法重跑，且 v1 已 validated + 不可变，
+-- 重跑会因触发器被拒绝。
+--
+-- 保留本文件仅为历史追溯（v1 的 provenance 事实描述：
+-- source_table = public.hfq_daily）。
+-- 新环境初始化请使用 `base factor-builder`（从 market_daily_bar + tong.gbbq 构建）。
+-- ═══════════════════════════════════════════════════════════════════
+
 -- P3: 生成 factor_set v1（从已全市场验证的 hfq_daily.factor_cum 派生）
 -- 输入: public.hfq_daily（2008-01-02..2026-11-10, 15,655,244 行, 5,970 股）
 -- 算法: 与 hfq.py _compute_symbol 一致（v1 基线），绑定 code_commit

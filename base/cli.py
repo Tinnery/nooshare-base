@@ -66,7 +66,11 @@ def freshness():
 def hfq(
     symbols: str = typer.Option(None, help="逗号分隔 symbol 列表（如 sz000001,sh600519；缺省全市场）"),
 ):
-    """计算并写入 public.hfq_daily 后复权价格序列（源: tong.gbbq category=1 + tong.stock_daily）。"""
+    """[已迁移] 构建版本化复权因子。
+
+    public.hfq_daily 已退役，本命令不再写旧 HFQ 物理表，
+    改为等价调用 `factor-builder`。保留命令名仅为兼容旧脚本。
+    """
     import json
     from base.adjust.hfq import run
 

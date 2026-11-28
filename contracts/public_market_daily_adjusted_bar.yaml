@@ -1,13 +1,18 @@
 contract: public.market_daily_adjusted_bar
-version: 1
+version: 2
 description: 指定factor_set_id的HFQ派生行情View。Raw行情×累计因子，HFQ由Base计算，Strategy不自行复权。
 type: view
-grain: [symbol, date, factor_set_id]
-consumer_contract: 必须 WHERE factor_set_id=<uuid> 固定复权版本；日期范围不保证同版本。
+grain: [symbol, date, market_source_id, factor_set_id]
+grain_rule: 同一Factor Set只绑定一个market_source_id，故本Grain唯一；无重复adjusted row。
+consumer_contract: 必须 WHERE factor_set_id=<uuid> 固定复权版本；禁止依赖latest指针；日期范围不保证同版本。
+source_identity: |
+  JOIN market_adjustment_factor_set 约束 fs.factor_set_id = f.factor_set_id
+  且 fs.market_source_id = b.source_id。因子仅应用于其绑定的行情来源，
+  同一symbol/date在多source下不会跨来源错误复用因子。
 columns:
   - {name: symbol,           type: TEXT,    nullable: false, semantic: 完整身份}
   - {name: date,             type: INTEGER, nullable: false, semantic: 交易日YYYYMMDD}
-  - {name: market_source_id, type: TEXT,    nullable: false, semantic: 行情来源}
+  - {name: market_source_id, type: TEXT,    nullable: false, semantic: 行情来源，与factor set绑定一致}
   - {name: factor_set_id,    type: UUID,    nullable: false, semantic: 复权因子版本身份}
   - {name: open,             type: NUMERIC, nullable: false, semantic: Raw开盘(执行)}
   - {name: high,             type: NUMERIC, nullable: false, semantic: Raw最高}
@@ -20,8 +25,12 @@ columns:
   - {name: low_hfq,          type: DOUBLE,  nullable: true,  semantic: Raw low×factor_cum}
   - {name: close_hfq,        type: DOUBLE,  nullable: true,  semantic: Raw close×factor_cum(仅研究/信号)}
   - {name: factor_cum,       type: DOUBLE,  nullable: false, semantic: 当日累计复权因子}
+  - {name: factor_status,    type: TEXT,    nullable: false, semantic: valid|incomplete|unavailable，缺失不得静默填1}
 scope: 仅asset_family=equity；指数/ETF不写factor_cum=1伪记录，不在本View内。
 validation:
-  - v1 factor set: 15,655,244行/5970股/2008-01-02..2026-11-10
-  - HFQ价格抽样10000行与hfq_daily mismatch=0
-  - 累计因子全量与hfq_daily.factor_cum mismatch=0
+  - v1 factor set: 15,655,244行 / 5,970股 / 2008-01-02..2026-11-10，validated
+  - v2 factor set: 15,655,244行 / 5,970股 / 同区间，与v1逐值identical（max_abs_diff=0）
+  - Grain唯一性：0 duplicate row
+  - 来源身份：0 行 market_source_id 与 factor set binding 不符
+  - 非equity混入：0 行
+  - 重建校验：Raw × Factor 独立重算，不经由 hfq_daily（该表已退役）

@@ -1,71 +1,81 @@
 """Factor Builder: 从 Raw 行情 + 公司行为直接构建版本化复权因子。
 
 输入:
-  - public.market_daily_bar (equity only) — Raw OHLCV
+  - public.market_daily_bar (asset_family=equity) — Raw OHLCV, 唯一行情来源
   - tong.gbbq category=1 — 除权除息事件
-  - public.canonical_symbol — 证券身份校验
+  - public.canonical_symbol — 证券身份校验（不靠代码前缀猜交易所）
 
 输出:
-  - public.market_adjustment_factor_set — Factor Set 元数据（含完整 provenance）
+  - public.market_adjustment_factor_set — Factor Set 元数据（完整 provenance）
   - public.market_daily_adjustment_factor — 每日累计复权因子
 
-不写入 public.hfq_daily。不读取 public.hfq_daily。
+不读取 public.hfq_daily，不写入 public.hfq_daily。
 
-公式（与 hfq.py 保持一致的数学定义）:
+数学定义与旧 hfq.py 一致（P_pre 为除权日前最后交易日收盘价）:
   P_ex  = (P_pre - c1/10 + c2*c4/10) / (1 + c3/10 + c4/10)
   factor_event = P_pre / P_ex
-  factor_cum(t) = 上市起所有 effective_date <= t 的 factor_event 累乘
+  factor_cum(t) = 上市起所有 ex_date <= t 的 factor_event 累乘
+
+已知偏差（只记录不遮盖）:
+  - tong.stock_daily 自 2008-01 起，更早事件缺 P_pre 基准 → 该事件跳过，
+    该证券对应行标记 factor_status=incomplete，可审计，不静默填 1。
+  - gbbq 无 pub_date → PIT_UNPROVEN，记录在 known_at_cutoff。
 """
 import hashlib
 import json
 import logging
 import subprocess
 import uuid as uuid_mod
+from io import StringIO
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-from base.db import get_connection, read_sql
+from base.db import get_connection
 
 log = logging.getLogger(__name__)
 
-_CHUNK_ROWS = 5_000_000
+_CHUNK_ROWS = 3_000_000
 _ALGORITHM_VERSION = "v2(factor_builder-v1)"
+_BASE_DATE_POLICY = "listing_date=1.0"
+_KNOWN_AT_CUTOFF = "ex_date_based_no_pub_date(PIT_UNPROVEN)"
+_PRE_BASE_POLICY = "pre_2008_events_skipped_factor=1"
 
 
-def _get_git_sha() -> str:
-    """获取 nooshare-base 当前 HEAD 的完整 Git SHA。"""
+def _git_sha() -> str:
+    """nooshare-base 当前 HEAD 完整 SHA；取不到则明确 unavailable。"""
     try:
-        result = subprocess.run(
+        r = subprocess.run(
             ["git", "log", "-1", "--format=%H"],
             capture_output=True, text=True,
             cwd="/home/travis/nooshare-workenv/repos/nooshare-base",
         )
-        sha = result.stdout.strip()
+        sha = r.stdout.strip()
         if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha):
             return sha
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         log.warning("无法获取 Git SHA: %s", e)
     return "unavailable"
 
 
-def _compute_stream_hash(conn, query: str, params=None) -> str:
-    """流式计算查询结果的 SHA-256 哈希（不全部加载到内存）。"""
+def _stream_hash(conn, query: str, params=None) -> str:
+    """流式 SHA-256（不把全表读进内存）。"""
     h = hashlib.sha256()
     with conn.cursor() as cur:
         cur.execute(query, params)
         while True:
-            rows = cur.fetchmany(50000)
+            rows = cur.fetchmany(100_000)
             if not rows:
                 break
             for row in rows:
-                h.update("\t".join(str(v) if v is not None else "\\N" for v in row).encode())
+                h.update("\t".join("\\N" if v is None else str(v) for v in row).encode())
+                h.update(b"\n")
     return h.hexdigest()
 
 
 def load_prices(conn, symbols: Optional[list] = None) -> pd.DataFrame:
-    """从 market_daily_bar 读取 equity 行情（Raw OHLCV）。"""
+    """读 equity Raw 行情（market_daily_bar）。"""
     sql = """
         SELECT symbol, date, open, high, low, close, volume, amount, source_id
         FROM public.market_daily_bar
@@ -76,28 +86,43 @@ def load_prices(conn, symbols: Optional[list] = None) -> pd.DataFrame:
         sql += " AND symbol = ANY(%s)"
         params = (symbols,)
     sql += " ORDER BY symbol, date"
-    df = pd.read_sql(sql, conn, params=params)
-    return df
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+    return pd.DataFrame(rows, columns=cols)
 
 
 def load_events(conn, symbols: Optional[list] = None) -> pd.DataFrame:
-    """从 tong.gbbq 读取除权除息事件（category=1）。"""
-    sql = "SELECT symbol, date AS ex_date, c1, c2, c3, c4, source FROM tong.gbbq WHERE category = 1"
+    """读除权除息事件（tong.gbbq category=1）。"""
+    sql = ("SELECT symbol, date AS ex_date, c1, c2, c3, c4 "
+           "FROM tong.gbbq WHERE category = 1")
     params = None
     if symbols:
         sql += " AND symbol = ANY(%s)"
         params = (symbols,)
     sql += " ORDER BY symbol, ex_date"
-    df = pd.read_sql(sql, conn, params=params)
-    return df
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        cols = [d[0] for d in cur.description]
+        rows = cur.fetchall()
+    return pd.DataFrame(rows, columns=cols)
 
 
-def _event_factors(ev: pd.DataFrame, px: pd.DataFrame) -> tuple:
-    """计算单只股票的事件复权因子。
+def stock_identity(conn, symbols: Optional[list] = None) -> set:
+    """canonical 权威中的股票身份集合（asset_class=stock）。"""
+    sql = "SELECT symbol FROM public.canonical_symbol WHERE asset_class = 'stock'"
+    params = None
+    if symbols:
+        sql += " AND symbol = ANY(%s)"
+        params = (symbols,)
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return {r[0] for r in cur.fetchall()}
 
-    Returns:
-        (DataFrame[ex_date, factor], n_skipped_no_price, n_skipped_invalid)
-    """
+
+def _event_factors(ev: pd.DataFrame, px: pd.DataFrame):
+    """单股事件因子。返回 (DataFrame[ex_date,factor], n_no_price, n_invalid)。"""
     d = ev["c1"].fillna(0).to_numpy("float64") / 10.0
     s = ev["c3"].fillna(0).to_numpy("float64") / 10.0
     r = ev["c4"].fillna(0).to_numpy("float64") / 10.0
@@ -106,6 +131,7 @@ def _event_factors(ev: pd.DataFrame, px: pd.DataFrame) -> tuple:
     nonzero = (d != 0) | (s != 0) | (r != 0)
     if not nonzero.any():
         return pd.DataFrame(columns=["ex_date", "factor"]), 0, 0
+
     ev = ev.loc[nonzero].reset_index(drop=True)
     d, s, r, pr = d[nonzero], s[nonzero], r[nonzero], pr[nonzero]
 
@@ -117,73 +143,104 @@ def _event_factors(ev: pd.DataFrame, px: pd.DataFrame) -> tuple:
     )
     p_pre = asof["close"].to_numpy("float64")
     ex_price = (p_pre - d + pr * r) / (1.0 + s + r)
-    ok = np.isfinite(p_pre) & np.isfinite(ex_price) & (ex_price > 0)
 
-    n_no_price = int(ok.size - ok.sum() - ((ex_price <= 0) & np.isfinite(p_pre)).sum())
-    n_invalid = int(((ex_price <= 0) & np.isfinite(p_pre) & (p_pre > 0)).sum())
+    finite_pre = np.isfinite(p_pre)
+    ok = finite_pre & np.isfinite(ex_price) & (ex_price > 0)
+    n_invalid = int((finite_pre & (p_pre > 0) & ~(ex_price > 0)).sum())
+    n_no_price = int((~finite_pre).sum())
 
-    res = pd.DataFrame(
-        {"ex_date": ev["ex_date"].to_numpy()[ok], "factor": p_pre[ok] / ex_price[ok]}
-    )
+    res = pd.DataFrame({
+        "ex_date": ev["ex_date"].to_numpy()[ok],
+        "factor": p_pre[ok] / ex_price[ok],
+    })
     return res, n_no_price, n_invalid
 
 
-def _compute_symbol(px: pd.DataFrame, ev: Optional[pd.DataFrame]) -> tuple:
-    """单只股票：事件因子 → 逐日累计因子。
-
-    Returns:
-        (DataFrame[symbol, date, factor_cum, factor_status], skip 统计)
-    """
+def _compute_symbol(px: pd.DataFrame, ev: Optional[pd.DataFrame]):
+    """单股：事件因子 → 逐日累计因子。返回 (DataFrame, skip dict)。"""
     px = px.sort_values("date").reset_index(drop=True)
-    skip = {"no_price": 0, "invalid": 0, "all_zero": 0}
     symbol = px["symbol"].iloc[0]
+    dates = px["date"].to_numpy()
+    skip = {"no_price": 0, "invalid": 0, "all_zero": 0}
+
+    def _flat(status: str) -> pd.DataFrame:
+        return pd.DataFrame({
+            "symbol": symbol, "date": dates,
+            "factor_cum": np.ones(len(dates), dtype="float64"),
+            "factor_status": status,
+        })
 
     if ev is None or ev.empty:
-        result = pd.DataFrame({
-            "symbol": symbol,
-            "date": px["date"].values,
-            "factor_cum": np.ones(len(px), dtype="float64"),
-            "factor_status": "valid",
-        })
-        return result, skip
+        # 无公司行为事件：因子确实恒为 1，属 valid 而非缺失
+        return _flat("valid"), skip
 
     d = ev["c1"].fillna(0).to_numpy("float64") / 10.0
     s = ev["c3"].fillna(0).to_numpy("float64") / 10.0
     r = ev["c4"].fillna(0).to_numpy("float64") / 10.0
     if not ((d != 0) | (s != 0) | (r != 0)).any():
-        result = pd.DataFrame({
-            "symbol": symbol,
-            "date": px["date"].values,
-            "factor_cum": np.ones(len(px), dtype="float64"),
-            "factor_status": "valid",
-        })
         skip["all_zero"] = len(ev)
-        return result, skip
+        return _flat("valid"), skip
 
     evf, n_no_price, n_invalid = _event_factors(ev, px)
     skip["no_price"] = n_no_price
     skip["invalid"] = n_invalid
 
     if evf.empty:
-        factor_cum = np.ones(len(px), dtype="float64")
-    else:
-        merged = pd.merge_asof(
-            px[["date"]].sort_values("date"),
-            evf.sort_values("ex_date"),
-            left_on="date", right_on="ex_date",
-            direction="backward",
-        )
-        new_event = merged["ex_date"].ne(merged["ex_date"].shift()) & merged["factor"].notna()
-        factor_step = np.where(new_event, merged["factor"].values, 1.0)
-        factor_cum = np.cumprod(factor_step)
+        # 有事件但全部无法计算 → 不假装 valid
+        return _flat("incomplete"), skip
 
-    result = pd.DataFrame({
-        "symbol": symbol,
-        "date": px["date"].values,
-        "factor_cum": factor_cum,
-        "factor_status": "valid",
-    })
-    return result, skip
+    merged = pd.merge_asof(
+        px[["date"]].sort_values("date"),
+        evf.sort_values("ex_date"),
+        left_on="date", right_on="ex_date",
+        direction="backward",
+    )
+    new_event = merged["ex_date"].ne(merged["ex_date"].shift()) & merged["factor"].notna()
+    step = np.where(new_event, merged["factor"].to_numpy(), 1.0)
+    factor_cum = np.cumprod(step)
+
+    status = "incomplete" if (n_no_price + n_invalid) > 0 else "valid"
+    return pd.DataFrame({
+        "symbol": symbol, "date": dates,
+        "factor_cum": factor_cum, "factor_status": status,
+    }), skip
+
+
+def _coverage(conn, factor_set_id: str, symbols=None) -> dict:
+    """因子覆盖率审计（六项计数）。
+
+    覆盖分母限定为本 Factor Set 自身的证券集合：部分构建时不应把
+    未参与构建的证券计为 missing。全市场构建时两者等价。
+    """
+    q = """
+    WITH f AS (
+        SELECT symbol, date, factor_status
+        FROM public.market_daily_adjustment_factor
+        WHERE factor_set_id = %s
+    ), eq AS (
+        SELECT b.symbol, b.date
+        FROM public.market_daily_bar b
+        WHERE b.asset_family = 'equity'
+          AND b.symbol IN (SELECT DISTINCT symbol FROM f)
+    )
+    SELECT
+      (SELECT COUNT(*) FROM eq),
+      (SELECT COUNT(*) FROM f WHERE factor_status = 'valid'),
+      (SELECT COUNT(*) FROM f WHERE factor_status = 'incomplete'),
+      (SELECT COUNT(*) FROM f WHERE factor_status = 'unavailable'),
+      (SELECT COUNT(*) FROM eq e
+         LEFT JOIN f ON f.symbol = e.symbol AND f.date = e.date
+        WHERE f.symbol IS NULL),
+      (SELECT COUNT(*) FROM f
+         LEFT JOIN eq e ON e.symbol = f.symbol AND e.date = f.date
+        WHERE e.symbol IS NULL)
+    """
+    with conn.cursor() as cur:
+        cur.execute(q, (factor_set_id,))
+        row = cur.fetchone()
+    keys = ["raw_equity_rows", "valid_factor_rows", "incomplete_factor_rows",
+            "unavailable_factor_rows", "missing_factor_rows", "unexpected_factor_rows"]
+    return dict(zip(keys, (int(x) for x in row)))
 
 
 def build_factor_set(
@@ -191,228 +248,184 @@ def build_factor_set(
     factor_set_name: Optional[str] = None,
     dry_run: bool = False,
 ) -> dict:
-    """构建新的 Factor Set。
+    """构建新 Factor Set。
 
-    流程:
-    1. 注册 Factor Set（status=building）
-    2. 读取 Raw 行情 + 公司行为
-    3. 计算输入哈希
-    4. 逐股票计算 factor_cum
-    5. 写入 market_daily_adjustment_factor
-    6. 验证
-    7. 标记 validated
-
-    Returns:
-        dict: 构建统计与验证结果
+    building → 计算 → 写因子 → 验证 → validated。失败停在 building，绝不半发布。
     """
-    factor_set_id = uuid_mod.uuid4()
-    git_sha = _get_git_sha()
-
+    factor_set_id = str(uuid_mod.uuid4())
+    git_sha = _git_sha()
     if factor_set_name is None:
-        factor_set_name = f"hfq_v2_{factor_set_id.hex[:8]}"
+        factor_set_name = "hfq_v2_" + factor_set_id.replace("-", "")[:8]
 
     log.info("=== Factor Builder 启动 ===")
-    log.info("factor_set_id: %s", factor_set_id)
-    log.info("factor_set_name: %s", factor_set_name)
-    log.info("algorithm_version: %s", _ALGORITHM_VERSION)
-    log.info("code_commit: %s", git_sha)
+    log.info("factor_set_id=%s name=%s", factor_set_id, factor_set_name)
+    log.info("algorithm_version=%s code_commit=%s", _ALGORITHM_VERSION, git_sha)
 
     with get_connection() as conn:
         conn.autocommit = False
 
-        # ── Step 1: 注册 Factor Set（building）──────────────────────────
+        # ── 1. 注册 building ────────────────────────────────────────────
         if not dry_run:
             with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO public.market_adjustment_factor_set (
-                        factor_set_id, factor_set_name, market_source_id, action_source_id,
-                        adjustment_method, algorithm_version, base_date_policy,
-                        code_commit, status, notes
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                """, (
-                    factor_set_id, factor_set_name, "tdx", "tdx",
-                    "HFQ", _ALGORITHM_VERSION, "listing_date=1.0",
-                    git_sha, "building",
-                    f"Factor Builder v2: direct from market_daily_bar + tong.gbbq"
-                ))
+                cur.execute(
+                    "INSERT INTO public.market_adjustment_factor_set ("
+                    " factor_set_id, factor_set_name, market_source_id, action_source_id,"
+                    " adjustment_method, algorithm_version, base_date_policy,"
+                    " code_commit, status, notes"
+                    ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        factor_set_id, factor_set_name, "tdx", "tdx",
+                        "HFQ", _ALGORITHM_VERSION, _BASE_DATE_POLICY,
+                        git_sha, "building",
+                        "Factor Builder v2: raw view + gbbq, no hfq_daily",
+                    ),
+                )
             conn.commit()
-            log.info("Factor Set 已注册（building）")
 
-        # ── Step 2: 读取输入数据 ────────────────────────────────────────
-        log.info("读取 Raw 行情...")
+        # ── 2. 读输入 ──────────────────────────────────────────────────
         prices = load_prices(conn, symbols)
-        n_syms = prices["symbol"].nunique()
-        log.info("行情 %d 行 / %d 股", len(prices), n_syms)
+        if prices.empty:
+            raise RuntimeError("market_daily_bar 无 equity 行情，拒绝构建空 Factor Set")
+        stocks = stock_identity(conn, symbols)
+        prices = prices[prices["symbol"].isin(stocks)].reset_index(drop=True)
+        n_syms = int(prices["symbol"].nunique())
+        log.info("行情 %d 行 / %d 股（已按 canonical stock 过滤）", len(prices), n_syms)
 
-        log.info("读取公司行为事件...")
-        events = load_events(conn, symbols)
-        log.info("事件 %d 条 / %d 股", len(events), events["symbol"].nunique())
+        events = load_events(conn, list(prices["symbol"].unique()))
+        log.info("事件 %d 条", len(events))
 
-        # ── Step 3: 计算输入哈希 ────────────────────────────────────────
-        log.info("计算输入哈希...")
-        bar_hash = _compute_stream_hash(
+        # ── 3. 输入哈希（真实流式 SHA-256）──────────────────────────────
+        bar_hash = _stream_hash(
             conn,
-            "SELECT symbol, date, close FROM public.market_daily_bar "
-            "WHERE asset_family = 'equity' ORDER BY symbol, date"
+            "SELECT symbol, date, open, high, low, close, volume, amount "
+            "FROM public.market_daily_bar WHERE asset_family = 'equity' ORDER BY symbol, date",
         )
-        action_hash = _compute_stream_hash(
+        action_hash = _stream_hash(
             conn,
-            "SELECT symbol, date, c1, c2, c3, c4 FROM tong.gbbq "
-            "WHERE category = 1 ORDER BY symbol, date"
+            "SELECT symbol, date, c1, c2, c3, c4 FROM tong.gbbq WHERE category = 1 "
+            "ORDER BY symbol, date",
         )
-        log.info("input_bar_hash: %s", bar_hash)
-        log.info("input_action_hash: %s", action_hash)
+        log.info("bar_hash=%s action_hash=%s", bar_hash, action_hash)
 
-        # ── Step 4: 逐股票计算 factor_cum ──────────────────────────────
-        log.info("计算因子...")
-        ev_by_sym = {k: v for k, v in events.groupby("symbol", sort=False)}
-        parts = []
-        skip_total = {"no_price": 0, "invalid": 0, "all_zero": 0}
-
-        for sym, px in prices.groupby("symbol", sort=False):
-            part, skip = _compute_symbol(px, ev_by_sym.get(sym))
+        # ── 4. 计算因子 ────────────────────────────────────────────────
+        ev_by_sym = {k: v for k, v in events.groupby("symbol", sort=False)} if len(events) else {}
+        parts, skip_total = [], {"no_price": 0, "invalid": 0, "all_zero": 0}
+        for _sym, px in prices.groupby("symbol", sort=False):
+            part, skip = _compute_symbol(px, ev_by_sym.get(_sym))
             parts.append(part)
             for k in skip_total:
                 skip_total[k] += skip[k]
-
         factors = pd.concat(parts, ignore_index=True)
-        log.info("因子计算完成: %d 行 / %d 股", len(factors), factors["symbol"].nunique())
+        log.info("因子 %d 行 / %d 股", len(factors), factors["symbol"].nunique())
 
-        # ── Step 5: 构建 manifest ──────────────────────────────────────
         min_date = int(prices["date"].min())
         max_date = int(prices["date"].max())
         manifest = {
-            "bar_row_count": len(prices),
-            "bar_symbol_count": int(n_syms),
+            "bar_rows": int(len(prices)),
+            "bar_symbols": n_syms,
             "bar_min_date": min_date,
             "bar_max_date": max_date,
-            "action_row_count": len(events),
-            "action_symbol_count": int(events["symbol"].nunique()),
-            "action_min_date": int(events["date"].min()) if len(events) > 0 else None,
-            "action_max_date": int(events["date"].max()) if len(events) > 0 else None,
-            "factor_row_count": len(factors),
-            "factor_symbol_count": int(factors["symbol"].nunique()),
+            "action_rows": int(len(events)),
+            "action_symbols": int(events["symbol"].nunique()) if len(events) else 0,
+            "action_min_date": int(events["ex_date"].min()) if len(events) else None,
+            "action_max_date": int(events["ex_date"].max()) if len(events) else None,
+            "factor_rows": int(len(factors)),
+            "factor_symbols": int(factors["symbol"].nunique()),
+            "status_counts": {str(k): int(v) for k, v in
+                              factors["factor_status"].value_counts().items()},
         }
 
-        # ── Step 6: 写入因子表 ─────────────────────────────────────────
+        # ── 5. 写因子 ──────────────────────────────────────────────────
         if not dry_run:
-            log.info("写入因子表...")
-            for i in range(0, len(factors), _CHUNK_ROWS):
+            cols = ["factor_set_id", "symbol", "date", "factor_cum", "factor_status"]
+            total = len(factors)
+            for i in range(0, total, _CHUNK_ROWS):
                 chunk = factors.iloc[i:i + _CHUNK_ROWS].copy()
-                chunk["factor_set_id"] = factor_set_id
-                # 使用 INSERT ... ON CONFLICT 确保幂等
-                cols = ["factor_set_id", "symbol", "date", "factor_cum", "factor_status"]
-                col_str = ", ".join(cols)
+                chunk.insert(0, "factor_set_id", factor_set_id)
                 with conn.cursor() as cur:
-                    # 使用临时表 + COPY 模式
-                    temp_table = "_temp_factor_insert"
-                    cur.execute(f"DROP TABLE IF EXISTS {temp_table}")
-                    cur.execute(f"""
-                        CREATE TEMP TABLE {temp_table} (
-                            factor_set_id UUID NOT NULL,
-                            symbol TEXT NOT NULL,
-                            date INTEGER NOT NULL,
-                            factor_cum DOUBLE PRECISION NOT NULL,
-                            factor_status TEXT NOT NULL DEFAULT 'valid'
-                        )
-                    """)
-                    from io import StringIO
+                    cur.execute("DROP TABLE IF EXISTS _temp_factor_builder")
+                    cur.execute(
+                        "CREATE TEMP TABLE _temp_factor_builder ("
+                        " factor_set_id UUID NOT NULL,"
+                        " symbol TEXT NOT NULL,"
+                        " date INTEGER NOT NULL,"
+                        " factor_cum DOUBLE PRECISION NOT NULL,"
+                        " factor_status TEXT NOT NULL)"
+                    )
                     buf = StringIO()
                     chunk[cols].to_csv(buf, sep="\t", header=False, index=False, na_rep="\\N")
                     buf.seek(0)
-                    cur.copy_from(buf, temp_table, null="\\N")
-                    cur.execute(f"""
-                        INSERT INTO public.market_daily_adjustment_factor
-                            ({col_str})
-                        SELECT {col_str} FROM {temp_table}
-                        ON CONFLICT (factor_set_id, symbol, date) DO NOTHING
-                    """)
-                    cur.execute(f"DROP TABLE IF EXISTS {temp_table}")
+                    cur.copy_from(buf, "_temp_factor_builder", null="\\N")
+                    cur.execute(
+                        "INSERT INTO public.market_daily_adjustment_factor"
+                        " (factor_set_id, symbol, date, factor_cum, factor_status)"
+                        " SELECT factor_set_id, symbol, date, factor_cum, factor_status"
+                        " FROM _temp_factor_builder"
+                        " ON CONFLICT (factor_set_id, symbol, date) DO NOTHING"
+                    )
+                    cur.execute("DROP TABLE IF EXISTS _temp_factor_builder")
                 conn.commit()
-                log.info("写入 %d / %d", min(i + _CHUNK_ROWS, len(factors)), len(factors))
+                log.info("写入 %d / %d", min(i + _CHUNK_ROWS, total), total)
 
-        # ── Step 7: 验证 ───────────────────────────────────────────────
-        log.info("验证因子...")
-        validation = {}
-
+        # ── 6. 验证 ────────────────────────────────────────────────────
+        coverage = _coverage(conn, factor_set_id, symbols) if not dry_run else {}
+        validation = {"coverage": coverage}
+        ok = True
         if not dry_run:
             with conn.cursor() as cur:
-                # 行数验证
                 cur.execute(
-                    "SELECT COUNT(*) FROM public.market_daily_adjustment_factor WHERE factor_set_id = %s",
-                    (factor_set_id,)
-                )
-                db_row_count = cur.fetchone()[0]
-                validation["db_row_count"] = db_row_count
-                validation["expected_row_count"] = len(factors)
-                validation["row_count_match"] = db_row_count == len(factors)
-
-                # 证券数验证
-                cur.execute(
-                    "SELECT COUNT(DISTINCT symbol) FROM public.market_daily_adjustment_factor WHERE factor_set_id = %s",
-                    (factor_set_id,)
-                )
-                db_sym_count = cur.fetchone()[0]
-                validation["db_symbol_count"] = db_sym_count
-
-                # NULL 检查
+                    "SELECT COUNT(*) FROM public.market_daily_adjustment_factor "
+                    "WHERE factor_set_id = %s", (factor_set_id,))
+                db_rows = int(cur.fetchone()[0])
                 cur.execute(
                     "SELECT COUNT(*) FROM public.market_daily_adjustment_factor "
                     "WHERE factor_set_id = %s AND (factor_cum IS NULL OR factor_status IS NULL)",
-                    (factor_set_id,)
-                )
-                null_count = cur.fetchone()[0]
-                validation["null_count"] = null_count
-
-                # 日期范围
+                    (factor_set_id,))
+                nulls = int(cur.fetchone()[0])
                 cur.execute(
-                    "SELECT MIN(date), MAX(date) FROM public.market_daily_adjustment_factor WHERE factor_set_id = %s",
-                    (factor_set_id,)
-                )
-                min_d, max_d = cur.fetchone()
-                validation["min_date"] = min_d
-                validation["max_date"] = max_d
+                    "SELECT MIN(date), MAX(date) FROM public.market_daily_adjustment_factor "
+                    "WHERE factor_set_id = %s", (factor_set_id,))
+                dmin, dmax = cur.fetchone()
+            validation.update({
+                "db_rows": db_rows, "expected_rows": int(len(factors)),
+                "row_match": db_rows == len(factors), "nulls": nulls,
+                "db_min_date": dmin, "db_max_date": dmax,
+            })
+            ok = (
+                db_rows == len(factors)
+                and nulls == 0
+                and coverage.get("missing_factor_rows", 1) == 0
+                and coverage.get("unexpected_factor_rows", 1) == 0
+            )
 
-        # ── Step 8: 更新 Factor Set 元数据 ─────────────────────────────
-        all_valid = (
-            validation.get("row_count_match", False)
-            and validation.get("null_count", 999) == 0
-        )
-
+        # ── 7. 定稿 ────────────────────────────────────────────────────
         if not dry_run:
-            new_status = "validated" if all_valid else "building"
+            status = "validated" if ok else "building"
             with conn.cursor() as cur:
-                cur.execute("""
-                    UPDATE public.market_adjustment_factor_set SET
-                        input_bar_hash = %s,
-                        input_action_hash = %s,
-                        input_manifest = %s,
-                        known_at_cutoff = %s,
-                        pre_base_policy = %s,
-                        row_count = %s,
-                        validated_at = CASE WHEN %s THEN now() ELSE NULL END,
-                        status = %s,
-                        notes = %s
-                    WHERE factor_set_id = %s
-                """, (
-                    bar_hash,
-                    action_hash,
-                    json.dumps(manifest),
-                    f"max_bar_date={max_date}",
-                    "pre_2008_events_skipped_factor=1",
-                    len(factors),
-                    all_valid,
-                    new_status,
-                    f"Factor Builder v2: {len(factors)} rows, {factors['symbol'].nunique()} symbols, "
-                    f"skip(no_price={skip_total['no_price']}, invalid={skip_total['invalid']}, "
-                    f"all_zero={skip_total['all_zero']})",
-                    factor_set_id,
-                ))
+                cur.execute(
+                    "UPDATE public.market_adjustment_factor_set SET"
+                    " input_bar_hash = %s, input_action_hash = %s,"
+                    " input_manifest = %s, known_at_cutoff = %s,"
+                    " pre_base_policy = %s, row_count = %s,"
+                    " validated_at = CASE WHEN %s THEN now() ELSE NULL END,"
+                    " status = %s, notes = %s"
+                    " WHERE factor_set_id = %s",
+                    (
+                        bar_hash, action_hash, json.dumps(manifest, default=str),
+                        _KNOWN_AT_CUTOFF, _PRE_BASE_POLICY, int(len(factors)),
+                        ok, status,
+                        "Factor Builder v2 rows=%d symbols=%d skip=%s"
+                        % (len(factors), factors["symbol"].nunique(), json.dumps(skip_total)),
+                        factor_set_id,
+                    ),
+                )
             conn.commit()
-            log.info("Factor Set 状态: %s", new_status)
+            log.info("Factor Set 状态=%s", status)
+        else:
+            status = "building"
 
         result = {
-            "factor_set_id": str(factor_set_id),
+            "factor_set_id": factor_set_id,
             "factor_set_name": factor_set_name,
             "algorithm_version": _ALGORITHM_VERSION,
             "code_commit": git_sha,
@@ -421,10 +434,8 @@ def build_factor_set(
             "manifest": manifest,
             "skip": skip_total,
             "validation": validation,
-            "status": "validated" if all_valid else "building",
+            "status": status,
             "dry_run": dry_run,
         }
-
-        log.info("=== Factor Builder 完成 ===")
-        log.info("结果: %s", json.dumps({k: v for k, v in result.items() if k not in ("manifest",)}, ensure_ascii=False))
+        log.info("=== 完成: status=%s rows=%d ===", status, len(factors))
         return result

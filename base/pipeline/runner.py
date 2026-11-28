@@ -140,7 +140,6 @@ def compute_output_hash(products: Dict[str, int]) -> str:
         # 身份方案A 复合 PK = (exchange, canonical_id)，单列 hash 无法反映复合身份变化
         ("public.canonical_symbol", ["exchange", "canonical_id"], 10000),
         ("public.corporate_action_event", ["event_id"], 50000),
-        ("public.hfq_daily", ["symbol", "date"], 1000000),
     ]
     
     snapshot_parts = []
