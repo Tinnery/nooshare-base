@@ -92,8 +92,15 @@ CREATE TABLE IF NOT EXISTS tong.etf_daily (
 );
 CREATE TABLE IF NOT EXISTS tong.gbbq (
     symbol TEXT, stock_code TEXT, date INTEGER, category INTEGER,
-    c1 NUMERIC, c2 NUMERIC, c3 NUMERIC, c4 NUMERIC
+    c1 NUMERIC, c2 NUMERIC, c3 NUMERIC, c4 NUMERIC,
+    source TEXT, ingested_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- 旧 fixture 库可能已存在无 source 列的 tong.gbbq：
+-- CREATE TABLE IF NOT EXISTS 不会补列，必须显式 ALTER 才能与生产结构一致。
+-- Factor Builder 的 action_hash / load_events 依赖 gbbq.source。
+ALTER TABLE tong.gbbq ADD COLUMN IF NOT EXISTS source TEXT;
+ALTER TABLE tong.gbbq ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ DEFAULT now();
 
 -- finance.*（freshness 扫描 cash_flow_statement；PIT 视图用 cash_flow）
 CREATE TABLE IF NOT EXISTS finance.income_statement (
@@ -186,9 +193,9 @@ INSERT INTO tong.etf_daily VALUES
 -- category=1 除权除息：
 --   sh600000 20240104 每10股派2元   → P_ex = (10.30 - 0.2) / 1.0
 --   sz000001 20240105 每10股派1.2元+送5股 → P_ex = (11.30 - 0.12) / 1.5
-INSERT INTO tong.gbbq VALUES
-    ('sh600000', '600000', 20240104, 1, 2.0, 0, 0,   0),
-    ('sz000001', '000001', 20240105, 1, 1.2, 0, 5.0, 0);
+INSERT INTO tong.gbbq (symbol, stock_code, date, category, c1, c2, c3, c4, source) VALUES
+    ('sh600000', '600000', 20240104, 1, 2.0, 0, 0,   0, 'tdx'),
+    ('sz000001', '000001', 20240105, 1, 1.2, 0, 5.0, 0, 'tdx');
 
 INSERT INTO finance.income_statement VALUES
     ('600000', '20231231', '20240420', 173000000000, 143000000000, 42000000000, 41000000000, 1.39),

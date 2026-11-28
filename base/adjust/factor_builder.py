@@ -27,6 +27,7 @@ import logging
 import subprocess
 import uuid as uuid_mod
 from io import StringIO
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -44,19 +45,24 @@ _PRE_BASE_POLICY = "pre_2008_events_skipped_factor=1"
 
 
 def _git_sha() -> str:
-    """nooshare-base 当前 HEAD 完整 SHA；取不到则明确 unavailable。"""
-    try:
-        r = subprocess.run(
-            ["git", "log", "-1", "--format=%H"],
-            capture_output=True, text=True,
-            cwd="/home/travis/nooshare-workenv/repos/nooshare-base",
-        )
-        sha = r.stdout.strip()
-        if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha):
-            return sha
-    except Exception as e:  # noqa: BLE001
-        log.warning("无法获取 Git SHA: %s", e)
-    return "unavailable"
+    """nooshare-base 当前 HEAD 完整 SHA；取不到则抛出异常。
+    
+    从 Path(__file__) 推导仓库根目录，不依赖硬编码路径。
+    正式构建必须获取有效 Git SHA，否则拒绝发布。
+    """
+    # 从当前文件推导仓库根：base/adjust/factor_builder.py -> 仓库根
+    repo_root = Path(__file__).resolve().parent.parent.parent
+    r = subprocess.run(
+        ["git", "log", "-1", "--format=%H"],
+        capture_output=True, text=True,
+        cwd=str(repo_root),
+    )
+    if r.returncode != 0:
+        raise RuntimeError(f"git log 失败: {r.stderr.strip()}")
+    sha = r.stdout.strip()
+    if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha):
+        return sha
+    raise RuntimeError(f"非法 SHA: {sha!r}")
 
 
 def _stream_hash(conn, query: str, params=None) -> str:
@@ -74,36 +80,48 @@ def _stream_hash(conn, query: str, params=None) -> str:
     return h.hexdigest()
 
 
-def load_prices(conn, symbols: Optional[list] = None) -> pd.DataFrame:
-    """读 equity Raw 行情（market_daily_bar）。"""
+def load_prices(conn, symbols: Optional[list] = None, source_id: str = "tdx") -> pd.DataFrame:
+    """读 equity Raw 行情（market_daily_bar），按 source_id 过滤。
+    
+    Args:
+        conn: 数据库连接
+        symbols: 可选证券代码列表
+        source_id: 行情来源 ID，默认 "tdx"。必须与 Factor Set 注册时一致。
+    """
     sql = """
         SELECT symbol, date, open, high, low, close, volume, amount, source_id
         FROM public.market_daily_bar
-        WHERE asset_family = 'equity'
+        WHERE asset_family = 'equity' AND source_id = %s
     """
-    params = None
+    params = [source_id]
     if symbols:
         sql += " AND symbol = ANY(%s)"
-        params = (symbols,)
+        params.append(symbols)
     sql += " ORDER BY symbol, date"
     with conn.cursor() as cur:
-        cur.execute(sql, params)
+        cur.execute(sql, tuple(params))
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
     return pd.DataFrame(rows, columns=cols)
 
 
-def load_events(conn, symbols: Optional[list] = None) -> pd.DataFrame:
-    """读除权除息事件（tong.gbbq category=1）。"""
-    sql = ("SELECT symbol, date AS ex_date, c1, c2, c3, c4 "
-           "FROM tong.gbbq WHERE category = 1")
-    params = None
+def load_events(conn, symbols: Optional[list] = None, source_id: str = "tdx") -> pd.DataFrame:
+    """读除权除息事件（tong.gbbq category=1），按 source_id 过滤。
+    
+    Args:
+        conn: 数据库连接
+        symbols: 可选证券代码列表
+        source_id: 公司行为来源 ID，默认 "tdx"。必须与 Factor Set 注册时一致。
+    """
+    sql = ("SELECT symbol, date AS ex_date, c1, c2, c3, c4, source "
+           "FROM tong.gbbq WHERE category = 1 AND source = %s")
+    params = [source_id]
     if symbols:
         sql += " AND symbol = ANY(%s)"
-        params = (symbols,)
+        params.append(symbols)
     sql += " ORDER BY symbol, ex_date"
     with conn.cursor() as cur:
-        cur.execute(sql, params)
+        cur.execute(sql, tuple(params))
         cols = [d[0] for d in cur.description]
         rows = cur.fetchall()
     return pd.DataFrame(rows, columns=cols)
@@ -206,11 +224,17 @@ def _compute_symbol(px: pd.DataFrame, ev: Optional[pd.DataFrame]):
     }), skip
 
 
-def _coverage(conn, factor_set_id: str, symbols=None) -> dict:
+def _coverage(conn, factor_set_id: str, symbols=None, source_id: str = "tdx") -> dict:
     """因子覆盖率审计（六项计数）。
 
     覆盖分母限定为本 Factor Set 自身的证券集合：部分构建时不应把
     未参与构建的证券计为 missing。全市场构建时两者等价。
+    
+    Args:
+        conn: 数据库连接
+        factor_set_id: Factor Set UUID
+        symbols: 可选证券代码列表（未使用，保留兼容）
+        source_id: 行情来源 ID，默认 "tdx"。必须与构建时一致。
     """
     q = """
     WITH f AS (
@@ -221,6 +245,7 @@ def _coverage(conn, factor_set_id: str, symbols=None) -> dict:
         SELECT b.symbol, b.date
         FROM public.market_daily_bar b
         WHERE b.asset_family = 'equity'
+          AND b.source_id = %s
           AND b.symbol IN (SELECT DISTINCT symbol FROM f)
     )
     SELECT
@@ -236,7 +261,7 @@ def _coverage(conn, factor_set_id: str, symbols=None) -> dict:
         WHERE e.symbol IS NULL)
     """
     with conn.cursor() as cur:
-        cur.execute(q, (factor_set_id,))
+        cur.execute(q, (factor_set_id, source_id))
         row = cur.fetchone()
     keys = ["raw_equity_rows", "valid_factor_rows", "incomplete_factor_rows",
             "unavailable_factor_rows", "missing_factor_rows", "unexpected_factor_rows"]
@@ -246,9 +271,18 @@ def _coverage(conn, factor_set_id: str, symbols=None) -> dict:
 def build_factor_set(
     symbols: Optional[list] = None,
     factor_set_name: Optional[str] = None,
+    market_source_id: str = "tdx",
+    action_source_id: str = "tdx",
     dry_run: bool = False,
 ) -> dict:
     """构建新 Factor Set。
+
+    Args:
+        symbols: 可选证券代码列表
+        factor_set_name: Factor Set 名称
+        market_source_id: 行情来源 ID，默认 "tdx"
+        action_source_id: 公司行为来源 ID，默认 "tdx"
+        dry_run: 是否只计算不写入
 
     building → 计算 → 写因子 → 验证 → validated。失败停在 building，绝不半发布。
     """
@@ -274,7 +308,7 @@ def build_factor_set(
                     " code_commit, status, notes"
                     ") VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
-                        factor_set_id, factor_set_name, "tdx", "tdx",
+                        factor_set_id, factor_set_name, market_source_id, action_source_id,
                         "HFQ", _ALGORITHM_VERSION, _BASE_DATE_POLICY,
                         git_sha, "building",
                         "Factor Builder v2: raw view + gbbq, no hfq_daily",
@@ -283,7 +317,7 @@ def build_factor_set(
             conn.commit()
 
         # ── 2. 读输入 ──────────────────────────────────────────────────
-        prices = load_prices(conn, symbols)
+        prices = load_prices(conn, symbols, source_id=market_source_id)
         if prices.empty:
             raise RuntimeError("market_daily_bar 无 equity 行情，拒绝构建空 Factor Set")
         stocks = stock_identity(conn, symbols)
@@ -291,19 +325,22 @@ def build_factor_set(
         n_syms = int(prices["symbol"].nunique())
         log.info("行情 %d 行 / %d 股（已按 canonical stock 过滤）", len(prices), n_syms)
 
-        events = load_events(conn, list(prices["symbol"].unique()))
+        events = load_events(conn, list(prices["symbol"].unique()), source_id=action_source_id)
         log.info("事件 %d 条", len(events))
 
         # ── 3. 输入哈希（真实流式 SHA-256）──────────────────────────────
         bar_hash = _stream_hash(
             conn,
-            "SELECT symbol, date, open, high, low, close, volume, amount "
-            "FROM public.market_daily_bar WHERE asset_family = 'equity' ORDER BY symbol, date",
+            "SELECT symbol, date, open, high, low, close, volume, amount, source_id "
+            "FROM public.market_daily_bar WHERE asset_family = 'equity' AND source_id = %s "
+            "ORDER BY symbol, date",
+            (market_source_id,),
         )
         action_hash = _stream_hash(
             conn,
-            "SELECT symbol, date, c1, c2, c3, c4 FROM tong.gbbq WHERE category = 1 "
-            "ORDER BY symbol, date",
+            "SELECT symbol, date, c1, c2, c3, c4, source FROM tong.gbbq WHERE category = 1 "
+            "AND source = %s ORDER BY symbol, date",
+            (action_source_id,),
         )
         log.info("bar_hash=%s action_hash=%s", bar_hash, action_hash)
 
@@ -321,6 +358,8 @@ def build_factor_set(
         min_date = int(prices["date"].min())
         max_date = int(prices["date"].max())
         manifest = {
+            "market_source_id": market_source_id,
+            "action_source_id": action_source_id,
             "bar_rows": int(len(prices)),
             "bar_symbols": n_syms,
             "bar_min_date": min_date,
@@ -368,7 +407,7 @@ def build_factor_set(
                 log.info("写入 %d / %d", min(i + _CHUNK_ROWS, total), total)
 
         # ── 6. 验证 ────────────────────────────────────────────────────
-        coverage = _coverage(conn, factor_set_id, symbols) if not dry_run else {}
+        coverage = _coverage(conn, factor_set_id, symbols, source_id=market_source_id) if not dry_run else {}
         validation = {"coverage": coverage}
         ok = True
         if not dry_run:
