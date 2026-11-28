@@ -82,8 +82,9 @@ jobs:
 
       # P3/P4: 因子版本表 + Adjusted bar 视图此前只在 pro 手工执行，
       # 新建 CI 库缺失导致 contract-test 失败（relation does not exist）。
-      # 因子数据灌入（migrate_factor_set_v1）不需要：空表时 contract-test
-      # 按契约跳过（表为空，跳过验证）。
+      # 因子“数据”灌入（migrate_factor_set_v1）在 hfq 之后执行：
+      # 空 factor 表会让 market_daily_adjusted_bar JOIN 后为空，
+      # P7 迁移后的 test_adjusted_bar_data（cnt>0）必然失败。
       - name: Migrate factor set schema and adjusted bar view
         run: |
           uv run python -c "from base.db import execute_sql; execute_sql(open('scripts/migrate_factor_set_schema.sql').read())"
@@ -107,6 +108,12 @@ jobs:
       # P0.5: 后复权计算（含 volume/amount）
       - name: Run HFQ calculation
         run: uv run base hfq
+
+      # P7 起集成测试要求 market_daily_adjusted_bar 有数据：因子版本表
+      # 必须从 hfq 产物灌入。v1 SQL 幂等（ON CONFLICT DO NOTHING），
+      # 在 DEV 真实库上为空操作，manifest 字段在 CI 上是 fixture 级元数据。
+      - name: Import factor set v1 from hfq output
+        run: uv run python -c "from base.db import execute_sql; execute_sql(open('scripts/migrate_factor_set_v1.sql').read())"
 
       # 集成测试依赖 fixture + schema + PIT 迁移 + 两次 build + hfq 产物。
       # 必须在这些步骤之后执行，不能在数据库初始化前收集运行。
