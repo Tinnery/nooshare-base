@@ -108,26 +108,6 @@ def init_schema():
         products JSONB
     );
 
-    -- P3 扩展: 后复权价格序列（base hfq 命令计算写入，源 tong.gbbq category=1）
-    CREATE TABLE IF NOT EXISTS public.hfq_daily (
-        symbol TEXT NOT NULL,
-        date INTEGER NOT NULL,
-        open DOUBLE PRECISION,
-        high DOUBLE PRECISION,
-        low DOUBLE PRECISION,
-        close DOUBLE PRECISION,
-        volume BIGINT,
-        amount DOUBLE PRECISION,
-        open_hfq DOUBLE PRECISION,
-        high_hfq DOUBLE PRECISION,
-        low_hfq DOUBLE PRECISION,
-        close_hfq DOUBLE PRECISION,
-        factor_cum DOUBLE PRECISION NOT NULL,
-        hfq_return DOUBLE PRECISION,
-        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-        PRIMARY KEY (symbol, date)
-    );
-
     -- 交易日历（PIT）：记录每日是否开盘
     CREATE TABLE IF NOT EXISTS public.trading_calendar (
         cal_date DATE NOT NULL,
@@ -155,23 +135,10 @@ def init_schema():
     CREATE INDEX IF NOT EXISTS idx_canonical_symbol_symbol ON public.canonical_symbol(symbol);
     CREATE INDEX IF NOT EXISTS idx_corporate_action_event_canonical ON public.corporate_action_event(canonical_id, effective_date);
     CREATE INDEX IF NOT EXISTS idx_pipeline_run_started ON public.pipeline_run(started_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_hfq_daily_date ON public.hfq_daily(date);
     CREATE INDEX IF NOT EXISTS idx_trading_calendar_date ON public.trading_calendar(cal_date);
     CREATE INDEX IF NOT EXISTS idx_limit_rule_pit_type_exchange ON public.limit_rule_pit(security_type, exchange, effective_from);
     """
     execute_sql(tables_sql)
-
-    # v1 → v2 迁移：为旧表添加 volume 和 amount 列（如果不存在）
-    # 这确保旧数据库也能升级到契约 v2，而不仅限于新建数据库
-    migration_sql = """
-    ALTER TABLE public.hfq_daily
-        ADD COLUMN IF NOT EXISTS volume BIGINT;
-    
-    ALTER TABLE public.hfq_daily
-        ADD COLUMN IF NOT EXISTS amount DOUBLE PRECISION;
-    """
-    execute_sql(migration_sql)
-    log.info("hfq_daily v1→v2 迁移完成：volume/amount 列已添加（如不存在）")
 
     # P3: 物化 PIT 视图
     # 先删除旧视图（如果存在）

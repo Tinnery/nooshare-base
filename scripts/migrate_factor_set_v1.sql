@@ -1,54 +1,39 @@
--- P3: 生成 factor_set v1（从已全市场验证的 hfq_daily.factor_cum 派生）
--- 输入: public.hfq_daily（2008-01-02..2026-11-10, 15,655,244 行, 5,970 股）
--- 算法: 与 hfq.py _compute_symbol 一致（v1 基线），绑定 code_commit
--- 幂等: 同 factor_set_name 已存在则跳过
+-- ═══════════════════════════════════════════════════════════════════
+-- [HISTORICAL MIGRATION — 已退役，仅保留 provenance 事实记录]
+--
+-- 历史事实：Factor Set v1（11111111-...）最初由 public.hfq_daily.factor_cum
+-- 一次性导入生成，其 input_manifest.source_table 记录 'public.hfq_daily'。
+-- 该字符串是对历史构建过程的事实描述，不是运行时依赖，不应篡改。
+--
+-- public.hfq_daily 已 DROP。因此：
+--   * 本脚本不再读取旧表，也不再写入任何因子数据；
+--   * 若 v1 已存在（现状），脚本为纯空操作，只做存在性自检；
+--   * 若 v1 不存在（全新环境），应使用 `base factor-builder`
+--     从 market_daily_bar + tong.gbbq 构建新的 Factor Set，而不是复原 v1。
+--
+-- 保留本文件仅用于追溯 v1 的来源；禁止纳入自动 migration runner。
+-- ═══════════════════════════════════════════════════════════════════
 
-BEGIN;
+\pset pager off
 
-INSERT INTO public.market_adjustment_factor_set (
-    factor_set_id, factor_set_name, market_source_id, action_source_id,
-    adjustment_method, algorithm_version, base_date_policy,
-    input_bar_hash, input_action_hash, input_manifest,
-    code_commit, known_at_cutoff, pre_base_policy, status, row_count, validated_at, notes
-)
+-- 存在性自检：v1 是否仍在库中
 SELECT
-    '11111111-1111-4111-8111-111111111111'::uuid,
-    'hfq_v1_from_hfq_daily',
-    'tdx', 'tdx', 'HFQ', 'v1(hfq.py baseline)',
-    'listing_date=1.0',
-    md5('15655244|20080102|20261110|42433834.59|5970'),
-    md5('tong.gbbq category=1; 69398 rows; verified 99.92%'),
-    jsonb_build_object(
-        'source_table', 'public.hfq_daily',
-        'row_count', 15655244,
-        'min_date', 20080102,
-        'max_date', 20261110,
-        'n_symbols', 5970,
-        'factor_cum_sum', 42433834.59
-    ),
-    '1ce97a3',
-    'ex_date_based_no_pub_date(PIT_UNPROVEN)',
-    'pre_2008_events_skipped_factor=1',
-    'validated', 15655244, now(),
-    'v1 baseline factor set: imported from validated public.hfq_daily.factor_cum; PIT unverified (pub_date absent)'
-ON CONFLICT (factor_set_id) DO NOTHING;
-
--- 导入每日累计因子（幂等: ON CONFLICT DO NOTHING）
-INSERT INTO public.market_daily_adjustment_factor (
-    factor_set_id, symbol, date, factor_cum, factor_status
-)
-SELECT
-    '11111111-1111-4111-8111-111111111111'::uuid,
-    symbol, date, factor_cum, 'valid'
-FROM public.hfq_daily
-ON CONFLICT (factor_set_id, symbol, date) DO NOTHING;
-
-COMMIT;
-
--- 验证
-SELECT fs.factor_set_name, fs.status, fs.row_count AS declared,
-       count(f.symbol) AS actual, min(f.date) AS min_date, max(f.date) AS max_date
+    fs.factor_set_id,
+    fs.factor_set_name,
+    fs.status,
+    fs.row_count AS declared_rows,
+    fs.input_manifest->>'source_table' AS historical_source_table,
+    fs.algorithm_version,
+    fs.code_commit,
+    fs.validated_at
 FROM public.market_adjustment_factor_set fs
-LEFT JOIN public.market_daily_adjustment_factor f ON f.factor_set_id = fs.factor_set_id
-WHERE fs.factor_set_name = 'hfq_v1_from_hfq_daily'
-GROUP BY fs.factor_set_name, fs.status, fs.row_count;
+WHERE fs.factor_set_id = '11111111-1111-4111-8111-111111111111';
+
+-- 因子规模自检
+SELECT
+    COUNT(*)            AS actual_rows,
+    COUNT(DISTINCT symbol) AS symbols,
+    MIN(date)           AS min_date,
+    MAX(date)           AS max_date
+FROM public.market_daily_adjustment_factor
+WHERE factor_set_id = '11111111-1111-4111-8111-111111111111';

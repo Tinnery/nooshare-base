@@ -66,7 +66,11 @@ def freshness():
 def hfq(
     symbols: str = typer.Option(None, help="逗号分隔 symbol 列表（如 sz000001,sh600519；缺省全市场）"),
 ):
-    """计算并写入 public.hfq_daily 后复权价格序列（源: tong.gbbq category=1 + tong.stock_daily）。"""
+    """[已迁移] 构建版本化复权因子。
+
+    public.hfq_daily 已退役，本命令不再写旧 HFQ 物理表，
+    改为等价调用 `factor-builder`。保留命令名仅为兼容旧脚本。
+    """
     import json
     from base.adjust.hfq import run
 
@@ -280,3 +284,26 @@ def dashboard(
 
 if __name__ == "__main__":
     app()
+
+
+@app.command()
+def factor_builder(
+    symbols: str = typer.Option(None, help="逗号分隔 symbol 列表（如 sz000001,sh600519；缺省全市场）"),
+    factor_set_name: str = typer.Option(None, help="Factor Set 名称（缺省自动生成）"),
+    dry_run: bool = typer.Option(False, help="仅计算不写入数据库"),
+):
+    """构建版本化复权因子（Factor Builder v2）。
+
+    从 Raw 行情 + 公司行为直接构建因子，不依赖 public.hfq_daily。
+    输出: market_adjustment_factor_set + market_daily_adjustment_factor
+    """
+    import json
+    from base.adjust.factor_builder import build_factor_set
+
+    symbol_list = [s.strip() for s in symbols.split(",")] if symbols else None
+    result = build_factor_set(
+        symbols=symbol_list,
+        factor_set_name=factor_set_name,
+        dry_run=dry_run,
+    )
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))

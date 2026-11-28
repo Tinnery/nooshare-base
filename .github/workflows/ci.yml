@@ -80,14 +80,13 @@ jobs:
       - name: Initialize database schema
         run: uv run base init-db
 
-      # P3/P4: 因子版本表 + Adjusted bar 视图此前只在 pro 手工执行，
-      # 新建 CI 库缺失导致 contract-test 失败（relation does not exist）。
-      # 因子数据灌入（migrate_factor_set_v1）不需要：空表时 contract-test
-      # 按契约跳过（表为空，跳过验证）。
-      - name: Migrate factor set schema and adjusted bar view
+      # P3/P4: 因子版本表 + Adjusted bar 视图 + 不可变性触发器。
+      # 这三者都是纯 schema 对象，不依赖任何行情数据，可在 build 之前建立。
+      - name: Migrate factor set schema, adjusted bar view, immutability guards
         run: |
           uv run python -c "from base.db import execute_sql; execute_sql(open('scripts/migrate_factor_set_schema.sql').read())"
           uv run python -c "from base.db import execute_sql; execute_sql(open('scripts/migrate_adjusted_bar_view.sql').read())"
+          uv run python -c "from base.db import execute_sql; execute_sql(open('scripts/migrate_factor_immutability.sql').read())"
 
       # P0.3/P0.4: PIT 迁移和涨跌停规则重建（必须在 build 之前）
       - name: Migrate PIT tables (limit_rule_pit)
@@ -104,11 +103,13 @@ jobs:
       - name: Run data pipeline (build #2, idempotency pair for V11)
         run: uv run base build
 
-      # P0.5: 后复权计算（含 volume/amount）
-      - name: Run HFQ calculation
-        run: uv run base hfq
+      # 构建版本化复权因子：直接从 market_daily_bar + tong.gbbq 计算，
+      # 不经过 public.hfq_daily（该表已退役）。CI fixture 有行情与事件，
+      # 因此会产生一个 validated factor set，供集成测试的 adjusted bar 断言使用。
+      - name: Build versioned factor set
+        run: uv run base factor-builder
 
-      # 集成测试依赖 fixture + schema + PIT 迁移 + 两次 build + hfq 产物。
+      # 集成测试依赖 fixture + schema + PIT 迁移 + 两次 build + 因子构建产物。
       # 必须在这些步骤之后执行，不能在数据库初始化前收集运行。
       - name: Run tests (unit + integration)
         run: uv run pytest -v

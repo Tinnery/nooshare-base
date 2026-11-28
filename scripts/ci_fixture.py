@@ -61,10 +61,29 @@ CREATE TABLE IF NOT EXISTS ju.limit_ratio (
 );
 CREATE TABLE IF NOT EXISTS ju.pub_date (stock_code TEXT, pub_date TEXT);
 CREATE TABLE IF NOT EXISTS ju.st_period (stock_code TEXT, start_date TEXT, end_date TEXT);
+-- 列类型必须镜像真实 ju.valuation（DEV 实证：date/numeric/timestamptz）：
+-- valuation_pit 物化视图无 cast 直投，fixture 用 TEXT 会让 effective_from
+-- 变 text，V10 的 effective_from > as_of::date 比较直接 UndefinedFunction。
+-- V10 已移除 NOT_APPLICABLE 逃逸舱，类型缺陷会让 validate 如实 FAIL。
 CREATE TABLE IF NOT EXISTS ju.valuation (
-    stock_code TEXT, start_date TEXT, end_date TEXT,
-    capitalization TEXT, circulating_cap TEXT, refreshed_at TEXT
+    stock_code TEXT, start_date DATE, end_date DATE,
+    capitalization NUMERIC, circulating_cap NUMERIC,
+    refreshed_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- 旧 fixture 库可能已存在 TEXT 类型的 ju.valuation：CREATE TABLE IF NOT
+-- EXISTS 只跳过建表，不会改列类型。V10 的
+-- "effective_from > as_of::date" 在 text 列上会 UndefinedFunction，
+-- 因此必须显式把列类型纠正为 DATE / NUMERIC / TIMESTAMPTZ。
+ALTER TABLE ju.valuation
+    ALTER COLUMN start_date TYPE DATE USING start_date::date,
+    ALTER COLUMN end_date   TYPE DATE USING end_date::date,
+    ALTER COLUMN capitalization  TYPE NUMERIC USING capitalization::numeric,
+    ALTER COLUMN circulating_cap TYPE NUMERIC USING circulating_cap::numeric;
+
+-- valuation_pit 是从 ju.valuation 展开的物化视图。若它由旧 TEXT schema
+-- 建出，列类型已被烧进视图，必须重建才能与修正后的基表一致。
+DROP MATERIALIZED VIEW IF EXISTS public.valuation_pit;
 
 -- tong.*（日期为 INTEGER YYYYMMDD，价格 numeric）
 CREATE TABLE IF NOT EXISTS tong.symbol_meta (
@@ -87,8 +106,15 @@ CREATE TABLE IF NOT EXISTS tong.etf_daily (
 );
 CREATE TABLE IF NOT EXISTS tong.gbbq (
     symbol TEXT, stock_code TEXT, date INTEGER, category INTEGER,
-    c1 NUMERIC, c2 NUMERIC, c3 NUMERIC, c4 NUMERIC
+    c1 NUMERIC, c2 NUMERIC, c3 NUMERIC, c4 NUMERIC,
+    source TEXT, ingested_at TIMESTAMPTZ DEFAULT now()
 );
+
+-- 旧 fixture 库可能已存在无 source 列的 tong.gbbq：
+-- CREATE TABLE IF NOT EXISTS 不会补列，必须显式 ALTER 才能与生产结构一致。
+-- Factor Builder 的 action_hash / load_events 依赖 gbbq.source。
+ALTER TABLE tong.gbbq ADD COLUMN IF NOT EXISTS source TEXT;
+ALTER TABLE tong.gbbq ADD COLUMN IF NOT EXISTS ingested_at TIMESTAMPTZ DEFAULT now();
 
 -- finance.*（freshness 扫描 cash_flow_statement；PIT 视图用 cash_flow）
 CREATE TABLE IF NOT EXISTS finance.income_statement (
@@ -181,9 +207,9 @@ INSERT INTO tong.etf_daily VALUES
 -- category=1 除权除息：
 --   sh600000 20240104 每10股派2元   → P_ex = (10.30 - 0.2) / 1.0
 --   sz000001 20240105 每10股派1.2元+送5股 → P_ex = (11.30 - 0.12) / 1.5
-INSERT INTO tong.gbbq VALUES
-    ('sh600000', '600000', 20240104, 1, 2.0, 0, 0,   0),
-    ('sz000001', '000001', 20240105, 1, 1.2, 0, 5.0, 0);
+INSERT INTO tong.gbbq (symbol, stock_code, date, category, c1, c2, c3, c4, source) VALUES
+    ('sh600000', '600000', 20240104, 1, 2.0, 0, 0,   0, 'tdx'),
+    ('sz000001', '000001', 20240105, 1, 1.2, 0, 5.0, 0, 'tdx');
 
 INSERT INTO finance.income_statement VALUES
     ('600000', '20231231', '20240420', 173000000000, 143000000000, 42000000000, 41000000000, 1.39),
